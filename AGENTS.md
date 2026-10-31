@@ -100,6 +100,11 @@ every show and the whole grid do not. So `backup` copies the config **and** thos
   costs seconds of stream interruption, so bundle such changes. Passwords and the rest apply live.
 - Never commit instance data. `instance/` and `.env` are gitignored, and `scripts/check-secrets.sh`
   blocks live values from entering a commit.
+- **`character.json` is the only home for station identity** — name, description, locale, timezone,
+  theme, houseRules. `settings.json` must not carry those six keys: `pull` strips them and `apply`
+  merges them back. A duplicate copy is how editing the character layer once became a silent no-op.
+- **`apply` re-reads the station afterwards and fails loudly if a field did not land.** HTTP 200 means
+  accepted, not stored; a silent no-op is the worst failure this tool has.
 - **`apply` runs `validate` first and refuses on any error.** A typo'd field is silently dropped by a
   shallow merge rather than rejected, so validation is the only thing standing between a typo and a
   live config change. Unknown fields are warnings (a newer server may add them); missing fields are errors.

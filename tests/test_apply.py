@@ -263,8 +263,11 @@ class BackupBeforeWriteTests(ApplyTestCase):
         self._saved_read = subwave.read_state_file
         subwave.SshStateSource = lambda config: subwave.LocalStateSource(
             self.server.state_dir)
-        subwave.read_state_file = lambda config, name: (
-            Path(self.server.state_dir) / name).read_text()
+        # The mock keeps the station in memory; the state dir is only its seed.
+        # Reading back the seed would compare against pre-apply state.
+        subwave.read_state_file = lambda config, name: json.dumps(
+            self.server.station.settings if name == "settings.json"
+            else self.server.station.schedule)
         subwave.detect_tier = lambda config, probe=None: (2, "mock state dir")
         self.addCleanup(self._restore_globals)
 

@@ -243,3 +243,81 @@ class CommandTests(SkillsTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiffTierTests(SkillsTestCase):
+    """diff must compare at the tier it detected, and never call a built-in removed."""
+
+    def test_untouched_capture_diffs_clean_at_tier_2(self):
+        self.assertEqual(self.pull()[0], 0)
+        code, output = self.run_cli("diff")
+        self.assertEqual(code, 0, output)
+        self.assertIn("in sync", output)
+        self.assertIn("skills    1 unchanged, 0 changed, 0 added, 0 removed", output)
+
+    def test_untouched_capture_diffs_clean_at_tier_1(self):
+        subwave.detect_tier = lambda config, probe=None: (1, "mock")
+        code, output = self.run_cli("pull", "--allow-lossy", "--force")
+        self.assertEqual(code, 0, output)
+        code, output = self.run_cli("diff")
+        self.assertEqual(code, 0, output)
+        self.assertIn("in sync", output)
+
+    def test_a_builtin_is_never_reported_as_removed(self):
+        self.pull()
+        _, output = self.run_cli("diff")
+        self.assertNotIn("curiosity", output,
+                         "a built-in is not captured, so it cannot be missing")
+
+    def test_a_real_edit_shows_as_changed(self):
+        self.pull()
+        self.run_cli("skills", "edit", "demo-skill", "--brief", "A different segment.")
+        code, output = self.run_cli("diff")
+        self.assertEqual(code, 1)
+        self.assertIn("changed: demo-skill", output)
+
+
+class MoodValidationTests(SkillsTestCase):
+    def setUp(self):
+        super().setUp()
+        # the vocabulary the fixture's shows already use, plus room to add one
+        self.server.station.settings["moods"] = [
+            {"name": "calm"}, {"name": "night"}, {"name": "reflective"},
+            {"name": "morning"}, {"name": "sunny"}]
+        self.pull()
+
+    def write_show(self, moods, genres=None):
+        path = subwave.INSTANCE_DIR / "character" / "shows" / "first-light.json"
+        document = json.loads(path.read_text())
+        document["moods"] = moods
+        if genres is not None:
+            document["genres"] = genres
+        path.write_text(json.dumps(document, indent=2))
+
+    def test_an_unknown_mood_warns_at_tier_2(self):
+        self.write_show(["calm", "nonexistent"])
+        code, output = self.run_cli("validate")
+        self.assertEqual(code, 0, "an unknown mood is a warning, not an error")
+        self.assertIn("warning", output)
+        self.assertIn("nonexistent", output)
+        self.assertIn("first-light.json", output)
+
+    def test_a_known_mood_is_silent(self):
+        self.write_show(["calm", "night"])
+        code, output = self.run_cli("validate")
+        self.assertEqual(code, 0, output)
+        self.assertIn("0 warning(s)", output)
+
+    def test_no_mood_check_without_station_access(self):
+        subwave.detect_tier = lambda config, probe=None: (1, "mock")
+        self.write_show(["nonexistent"])
+        code, output = self.run_cli("validate")
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("nonexistent", output, "tier 1 says nothing rather than guessing")
+
+    def test_a_genre_is_never_checked(self):
+        self.write_show(["calm"], genres=["A Made Up Genre That Does Not Exist"])
+        code, output = self.run_cli("validate")
+        self.assertEqual(code, 0, output)
+        self.assertIn("0 warning(s)", output, "genres are tags, not an enum")
+        self.assertNotIn("Made Up Genre", output)

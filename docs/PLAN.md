@@ -27,6 +27,10 @@ Read from `/var/sub-wave/settings.json` and `/var/sub-wave/schedule.json` via
 | Grid | Sun/Sat: Sunrise 00–06, Weekend Daylight 07–22, Late Feels 23; Mon–Thu: Sunrise 00–06, Working Day 07–22, Late Feels 23; Fri: Thank You-Know-Who 00–17, Friday Drive 18–23 |
 | Hosting | Marvin hosts 5 of 6 shows; Ford hosts Weekend Daylight Blend |
 
+One consequence worth stating up front: with `listenerAuth` off the controller **fails open**
+(`controller/src/util/listener-auth.ts`, `listenerAuthDecision()`), which is exactly why `/stream.mp3` is reachable
+today despite `privatePlayer: true`. See §8.1 for the fix and §12 Q2 for the resolved mechanics.
+
 ## 2. The constraint that shapes the design
 
 The documented API is not the config API. Verified:
@@ -265,8 +269,21 @@ dump.
 Smallest first: `djHouseRules` alone (`POST /api/settings` with one section). Then personas. Then shows. Then the
 grid. One section per apply invocation, each with its own `apply-log` entry.
 
+**Precondition for the privacy step (change 1) — before flipping anything:**
+
+```sh
+ssh homeserver 'docker exec sub-wave-controller cat /var/sub-wave/settings.json' > "$HOME/sw-backup/settings.before.json"
+ssh homeserver 'docker exec sub-wave-controller cat /var/sub-wave/schedule.json' > "$HOME/sw-backup/schedule.before.json"
+```
+
+Both files land **outside this repo** (they contain secrets). Then flip `privacy.listenerAuth`, restart the mixer,
+and **verify with one real listener connect** before telling anyone. The cost is one mixer restart, i.e. seconds of
+stream interruption; password changes after that are live, no restart. Bundle `stream.maxListeners` into the same
+restart so that interruption is paid once.
+
 **Exit criteria:** `verify` passes; `pull --check` reports no drift; `/api/schedule` grid matches the repo grid;
-`/api/now-playing` still advances; a listener can still play the stream.
+`/api/now-playing` still advances; a listener with the password can still play the stream; a connect with the wrong
+password is refused.
 
 ### Phase 4 — Deployment reproducibility
 
@@ -287,8 +304,8 @@ Each item is a hypothesis to review, not a decision already taken.
 
 | # | Gap | Proposal | Risk |
 | --- | --- | --- | --- |
-| 1 | `listenerAuth` false — the web player is password-gated but `/stream.mp3` is open to anyone with the URL | set `privacy.listenerAuth: true`; confirm the Icecast-side auth (`icecast_listener_auth.txt` exists in the state dir) is wired | medium: a wrong flip locks out invitees; test with one listener before announcing |
-| 2 | `maxListeners` 100 vs "never more than a handful" | `stream.maxListeners: 8` | low |
+| 1 | `listenerAuth` false — the web player is password-gated but `/stream.mp3` is open to anyone with the URL. The controller fails **open** while the setting is off (`controller/src/util/listener-auth.ts`, `listenerAuthDecision()`), which is why `privatePlayer: true` does not help | set `privacy.listenerAuth: true`, then **restart the mixer**. The controller writes `state/icecast_listener_auth.txt`; on the next broadcast/mixer restart the generated Icecast config gains per-mount `<authentication type="url">` blocks pointing at the controller's `POST /listener-auth`. No hand-edited `icecast.xml`, no compose edit, and no Caddy change (bundled Caddy already returns 404 for `/api/listener-auth`) | medium: costs **one mixer restart — seconds of stream interruption**; after that, password changes apply live. If the controller is down, new listeners fail closed while connected ones keep playing. Never expose `/api/listener-auth` publicly: it is a password oracle for the same password that guards the player |
+| 2 | `maxListeners` 100 vs "never more than a handful" | `stream.maxListeners: 8` — a real Icecast cap, not advisory: `ICECAST_MAX_CLIENTS` is injected into the broadcast container from settings (mirrored at `state/liquidsoap_icecast_max_clients.txt`), so it likely rides the same mixer-restart path as listener auth | low: takes effect on the next mixer restart, so pay for one restart by bundling it with change 1 |
 | 3 | Marvin hosts 5 of 6 shows | Sunrise Service → Arthur Dent (reluctant early riser); Friday Drive → Zaphod Beeblebrox (party, "always on"); keep Thank You-Know-Who, Working Day Vibes and Late Feels with Marvin; Weekend Daylight stays Ford → Marvin 3 / Ford 1 / Zaphod 1 / Arthur 1 | low: `personaId` swap only, guest lists already carry the other voices |
 | 4 | `playlistIds` empty on all 6 shows — no Navidrome anchoring | one curated Navidrome playlist per show; `playlistStrict` on for genre shows, off for banter shows | medium: needs Navidrome playlist ids (§12 Q4); wrong anchoring starves the picker |
 | 5 | `djHouseRules`, `djPrompt`, `djPrompts` empty | add global house rules: British English; never break character or mention being an AI; no real-world politics, medical, legal or financial advice; never spoil the Guide's answer; never read back listener data; keep talk under ~45 s; never announce the same track twice; no station-format talk during instrumental-only shows | low, and it is the cheapest visible quality win — Phase 3 step 1 |
@@ -341,10 +358,20 @@ Before the first real write: take a `GET /api/backup/export` (or a copy of `sett
 
 ## 12. Open questions for the human
 
+Q2 is answered and kept in place so the numbering referenced from §7 and §8 stays stable; the rest are open.
+
 1. **Persona rebalance (§8.3)** — approve Sunrise → Arthur and Friday Drive → Zaphod? It is a `personaId` swap
    with no data loss, but it changes who you hear when.
-2. **Listener auth** — is `/stream.mp3` actually open today, and does flipping `listenerAuth` depend on Icecast
-   config outside `settings.json`? What is the acceptable downtime to find out?
+2. **Listener auth — RESOLVED 2026-10-31; no question left.** The flip is self-contained in `settings.json`, with
+   no hand-edited `icecast.xml`: the controller writes `state/icecast_listener_auth.txt`, and on the next
+   broadcast/mixer restart the generated Icecast config gains per-mount `<authentication type="url">` blocks
+   pointing at the controller's `POST /listener-auth`. Enabling or disabling needs that one mixer restart (seconds
+   of stream interruption, the real cost); **password changes apply live**, no restart. Icecast asks the controller
+   on every listener connect, so if the controller is down new listeners fail closed while connected ones keep
+   playing. The bundled Caddy already returns 404 for `/api/listener-auth`, so no reverse-proxy change — and that
+   path must never be exposed publicly, since it is a password oracle for the player password. `/stream.mp3` is open
+   today because `listenerAuthDecision()` fails open when the setting is off. Residual work is only the Phase 3
+   precondition: back up `settings.json` + `schedule.json`, flip, restart, and verify with one real listener connect.
 3. **`maxListeners` 8** — right number, or do you want headroom (e.g. 12)?
 4. **Navidrome playlists** — which playlists anchor which shows, and how should the tool learn playlist ids
    (Navidrome API with the credentials in `settings.navidrome`, or by hand)? Until answered, `playlistIds` stays

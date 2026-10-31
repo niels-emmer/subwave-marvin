@@ -765,22 +765,8 @@ def _clean_blocklist_item(item, keys):
     return {key: copy.deepcopy(item[key]) for key in keys if key in item}
 
 
-def fetch_blocklist(config):
-    """GET /api/library/blocklist. Works at BOTH tiers: admin HTTP, complete.
-
-    This is the one entity tier 1 captures losslessly - unlike shows, which the
-    API trims to 7 of 26 fields.
-    """
-    try:
-        status, payload = http_json(config, "/api/library/blocklist", admin=True)
-    except ConfigError as exc:
-        raise ConfigError(
-            "the blocklist is read over the admin API, so pull now needs admin credentials: %s"
-            % exc)
-    if status == 404:
-        return empty_blocklist()
-    if status != 200:
-        raise ToolError("GET /api/library/blocklist returned HTTP %s" % status)
+def _clean_blocklist(payload):
+    """Keep the stored shape: the API adds live `active` and `matchCount`."""
     payload = payload or {}
     return {
         "entries": [_clean_blocklist_item(entry, ("type", "id", "name", "artist", "album",
@@ -790,6 +776,41 @@ def fetch_blocklist(config):
                                                "showIds", "addedAt"))
                   for rule in (payload.get("rules") or [])],
     }
+
+
+def read_blocklist_from_state(config, state=None):
+    """Tier 2: the file IS the document, minus the fields we drop anyway.
+
+    Reading it here keeps tier 2 free of a second credential. Someone who can
+    read the state files as root should not also need the admin password to pull.
+    """
+    state = state or SshStateSource(config)
+    if BLOCKLIST_FILE not in state.list_files():
+        return empty_blocklist()
+    try:
+        payload = json.loads(state.read_bytes(BLOCKLIST_FILE).decode("utf-8"))
+    except Exception as exc:
+        raise ToolError("cannot read %s from the state dir (%s)" % (BLOCKLIST_FILE, exc))
+    return _clean_blocklist(payload)
+
+
+def fetch_blocklist(config):
+    """Tier 1: GET /api/library/blocklist. Admin HTTP, and complete.
+
+    This is the one entity tier 1 captures losslessly - unlike shows, which the
+    API trims to 7 of 26 fields.
+    """
+    try:
+        status, payload = http_json(config, "/api/library/blocklist", admin=True)
+    except ConfigError as exc:
+        raise ConfigError(
+            "tier 1 reads the blocklist over the admin API, so it needs admin credentials: %s"
+            % exc)
+    if status == 404:
+        return empty_blocklist()
+    if status != 200:
+        raise ToolError("GET /api/library/blocklist returned HTTP %s" % status)
+    return _clean_blocklist(payload)
 
 
 def blocklist_to_repo(document, lock):
@@ -938,10 +959,11 @@ def cmd_pull(config, args):
                 "partial capture.")
         settings, schedule, losses = pull_lossy(config)
 
-    # Fetch the blocklist before writing anything: it is the one document read
-    # over HTTP at both tiers, and a credential failure must not leave instance/
-    # half-written.
-    blocklist_live = fetch_blocklist(config)
+    # Read the blocklist before writing anything, so a failure cannot leave
+    # instance/ half-written. Tier 2 reads the file it already has access to;
+    # tier 1 has no filesystem, so it uses the admin API.
+    blocklist_live = (read_blocklist_from_state(config) if tier == 2
+                      else fetch_blocklist(config))
 
     model = build_live_model(settings, schedule)
     if model["settings"] is None:

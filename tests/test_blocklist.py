@@ -86,6 +86,17 @@ class BlocklistTestCase(unittest.TestCase):
     def write_blocklist(self, document):
         self.blocklist_path().write_text(json.dumps(document, indent=2))
 
+    def set_station_blocklist(self, document):
+        """The station's own document: memory and state file, as tier 2 reads it."""
+        self.server.station.blocklist = (json.loads(json.dumps(document))
+                                         if document is not None
+                                         else {"entries": [], "rules": []})
+        path = Path(self.server.state_dir) / subwave.BLOCKLIST_FILE
+        if document is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(json.dumps(document, indent=2))
+
 
 class PullTests(BlocklistTestCase):
     def test_entries_and_rules_pull_intact(self):
@@ -111,7 +122,7 @@ class PullTests(BlocklistTestCase):
             self.assertNotIn("matchCount", item)
 
     def test_an_absent_blocklist_pulls_as_an_empty_document(self):
-        self.server.station.blocklist = {"entries": [], "rules": []}
+        self.set_station_blocklist(None)
         code, output = self.run_cli("pull", "--force")
         self.assertEqual(code, 0, output)
         self.assertEqual(self.repo_blocklist(), {"entries": [], "rules": []})
@@ -121,11 +132,46 @@ class PullTests(BlocklistTestCase):
 
     def test_show_ids_are_captured_as_slugs(self):
         show_id = self.server.station.schedule["shows"][0]["id"]
-        self.server.station.blocklist["rules"][0]["showIds"] = [show_id]
+        document = self.server.station.blocklist
+        document["rules"][0]["showIds"] = [show_id]
+        self.set_station_blocklist(document)
         self.run_cli("pull", "--force")
         rule = self.repo_blocklist()["rules"][0]
         self.assertNotIn(show_id, rule["showIds"], "show ids become slugs")
         self.assertTrue(rule["showIds"])
+
+
+class CredentialTests(BlocklistTestCase):
+    """Tier 2 must not acquire a second credential.
+
+    Tier 2 exists because you have host access; a user who can read the state
+    files as root should not also need the admin password to pull.
+    """
+
+    def test_tier_2_pull_needs_no_admin_credentials(self):
+        os.environ.pop("SUBWAVE_ADMIN_USER", None)
+        os.environ.pop("SUBWAVE_ADMIN_PASS", None)
+
+        code, output = self.run_cli("pull", "--force")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(self.repo_blocklist()["entries"]), 1)
+        self.assertEqual(len(self.repo_blocklist()["rules"]), 1)
+
+        api_calls = [entry for entry in self.server.station.requests
+                     if entry["path"] == "/api/library/blocklist"]
+        self.assertEqual(api_calls, [], "tier 2 reads the state file, not the API")
+
+    def test_tier_1_pull_reads_the_blocklist_over_the_api(self):
+        subwave.detect_tier = lambda config, probe=None: (1, "mock")
+
+        code, output = self.run_cli("pull", "--allow-lossy", "--force")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(self.repo_blocklist()["rules"]), 1)
+        self.assertIn("No christmas music", json.dumps(self.repo_blocklist()))
+
+        api_calls = [entry for entry in self.server.station.requests
+                     if entry["path"] == "/api/library/blocklist"]
+        self.assertTrue(api_calls, "tier 1 has no filesystem, so it uses the API")
 
 
 class ValidateTests(BlocklistTestCase):

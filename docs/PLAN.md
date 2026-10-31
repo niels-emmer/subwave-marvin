@@ -145,7 +145,7 @@ Python 3 stdlib only — no third-party deps, so the toolkit runs anywhere an ag
 | **P0 — capture** *(done)* | `.gitignore` first, then verbatim `settings.json` + `schedule.json` into `instance/` | instance files parse; 6 shows; 168/168 cells; `git status` and `git ls-files` never mention `instance/` |
 | **P1 — read-only tool** *(done)* | `status`, `pull`, `diff`, `backup`, tier detection, unit tests | `diff` reports clean straight after `pull`; tier 1 refuses or states exactly what it loses; `python3 -m unittest discover -s tests` green |
 | **P2 — character authoring** *(done)* | `character init/new-persona/new-show/add-to-grid`, character layer files, slug↔id lockfile, `validate` | `pull` round-trips `instance/` byte-identically (modulo redaction); `validate` catches a typo'd field before it can be merged away |
-| **P3 — apply** *(done, mock-verified)* | `validate` gate, ordered writes, dry run by default, lossy/sentinel/mid-show/backup guards, id assignment | proven against `tests/mock_station.py`: dry run sends nothing, shows sent whole, grid last, second apply a no-op. **Not yet run against the live station** |
+| **P3 — apply** *(done, live-verified)* | `validate` gate, ordered writes, dry run by default, lossy/sentinel/mid-show/backup guards, id assignment, post-apply readback | proven against `tests/mock_station.py` and then on a real station (T-F): six house rules landed and verified, `diff` in sync, `docs/applied.md` has the row |
 | **P4 — skills** *(merged, unrehearsed)* | `skills/<name>/SKILL.md`: new show, diagnose a host, backup | an agent completes each task from the skill alone, at the tier it announces — **not yet rehearsed end to end** |
 | **P5 — public readiness** | scrub, LICENSE, branch protection, repo settings | **human only**; the agent prepares a checklist and changes nothing on GitHub |
 
@@ -155,8 +155,11 @@ human-only and untouched. P2 is done: `character init --from blank|demo`, `new-p
 `apply` plan immediately. Scaffolded entities carry a local placeholder id (`p_local-…`, `s_local-…`);
 a show's is stripped on the wire so the station assigns a real one, which is written back to the file
 and the lockfile. P4's skills are merged and consistent
-with the tool, but nobody has yet completed a task from a skill alone. And the write path has never
-been exercised against a real station: everything above is mock-verified.
+with the tool, but nobody has yet completed a task from a skill alone. The write path has now been exercised against a real station (T-F): `apply` landed six house rules on the
+live station and verified clean. That first real apply found three defects the mock suite could not have
+found — a `take_backup` arity crash on the backup-taking path, `character.json` never reaching the station
+at all, and a post-apply check that both cried wolf and printed real secrets. All three are fixed and
+covered by tests. Everything else above remains mock-verified.
 
 **P3 is done against the mock and has never touched the live station.** `apply` refuses a lossy
 capture outright, refuses a payload still holding `__REDACTED__`, refuses mid-show without

@@ -169,6 +169,92 @@ class PostApplyCheckTests(CharacterAppliedTests):
         self.assertNotIn("did NOT land", output)
 
 
+class SecretVerificationTests(CharacterAppliedTests):
+    """A verification step must never be able to print a credential."""
+
+    SECRETS = {
+        "privacy.password": "thanks-for-all-the-fish-UNIQUE-MARKER",
+        "scrobble.lastfm.apiKey": "ee7d-UNIQUE-MARKER",
+        "scrobble.lastfm.apiSecret": "f05a-UNIQUE-MARKER",
+        "scrobble.lastfm.sessionKey": "RpBx-UNIQUE-MARKER",
+    }
+
+    def seed_secrets(self):
+        """Station holds real secrets; the repo holds sentinels, as a pull leaves them."""
+        for dotted, value in self.SECRETS.items():
+            parts = dotted.split(".")
+            node = self.server.station.settings
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = value
+
+        path = subwave.INSTANCE_DIR / "settings.json"
+        document = json.loads(path.read_text())
+        for dotted in self.SECRETS:
+            parts = dotted.split(".")
+            node = document
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = subwave.SENTINEL
+        path.write_text(json.dumps(document, indent=2))
+
+    def test_apply_with_secrets_succeeds_and_records_applied(self):
+        self.seed_secrets()
+        code, output = self.apply()
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("did NOT land", output)
+
+        lock = json.loads((subwave.INSTANCE_DIR / "ids.lock.json").read_text())
+        self.assertIn("applied", lock, "a successful write must be recorded")
+
+    def test_stdout_never_contains_a_secret(self):
+        self.seed_secrets()
+        code, output = self.apply()
+        self.assertEqual(code, 0, output)
+        for value in self.SECRETS.values():
+            self.assertNotIn(value, output, "a verification leaked a credential")
+
+    def test_a_secret_that_differs_is_reported_but_redacted(self):
+        self.seed_secrets()
+        # The station keeps its own password while we send a different one: the
+        # env value wins during rehydration, so the two genuinely disagree.
+        frozen = json.loads(json.dumps(self.server.station.settings))
+        original = subwave.read_state_file
+
+        def stale(config, name):
+            if name == "settings.json":
+                return json.dumps(frozen)
+            return original(config, name)
+
+        subwave.read_state_file = stale
+        os.environ["SUBWAVE_STATION_PASSWORD"] = "a-different-password-UNIQUE-MARKER"
+        self.addCleanup(lambda: os.environ.pop("SUBWAVE_STATION_PASSWORD", None))
+
+        code, output = self.apply()
+        self.assertNotEqual(code, 0, "a real mismatch must still fail loudly")
+        self.assertIn("privacy.password", output)
+        self.assertIn("secret", output)
+        for value in self.SECRETS.values():
+            self.assertNotIn(value, output, "a redacted report leaked the credential")
+        self.assertNotIn("a-different-password-UNIQUE-MARKER", output)
+
+    def test_a_non_secret_mismatch_is_still_loud_and_named(self):
+        original = subwave.read_state_file
+
+        def stale(config, name):
+            if name == "settings.json":
+                settings = dict(self.server.station.settings)
+                settings["locale"] = "xx-XX"
+                return json.dumps(settings)
+            return original(config, name)
+
+        subwave.read_state_file = stale
+        code, output = self.apply()
+        self.assertNotEqual(code, 0)
+        self.assertIn("did NOT land", output)
+        self.assertIn("locale", output)
+
+
 class RoundTripTests(CharacterAppliedTests):
     def test_apply_then_pull_then_diff_is_clean(self):
         self.edit_character(houseRules=["Speak plainly.", "No politics."],

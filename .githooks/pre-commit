@@ -1,0 +1,15 @@
+#!/bin/sh
+# Blocks commits that contain live station credentials.
+#
+# The hook does not bypass itself. To bypass deliberately:
+#   git commit --no-verify
+
+set -u
+
+if ! sh scripts/check-secrets.sh; then
+    echo
+    echo "pre-commit: commit blocked by scripts/check-secrets.sh"
+    echo "pre-commit: false positive? add '# nosecret' to that line."
+    echo "pre-commit: deliberate bypass: git commit --no-verify"
+    exit 1
+fi

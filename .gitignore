@@ -1,0 +1,15 @@
+# Credentials
+.env
+.env.*
+!.env.example
+
+# Local scratch
+*.bak
+backups/
+state/
+*.log
+.venv/
+__pycache__/
+
+# Recorded snapshots may carry live values; never commit them
+tests/fixtures/**/secrets*

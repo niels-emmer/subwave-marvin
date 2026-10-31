@@ -80,6 +80,8 @@ table 19, repo doc 20, live 21): `tools/list` is the truth. Ids are server-gener
 
 ## Commands
 
+Run `git config core.hooksPath .githooks` once after cloning: it enables the pre-commit secret gate, which agents never turn on otherwise.
+
 Live read and verify — every one of these was run against the live station:
 
 ```sh

@@ -21,7 +21,7 @@ this skill is only the order of operations.
 - `instance/character/schedule.json` names that slug in the agreed cells, and every changed cell has
   been shown to the human.
 - The human has seen the dry-run output and said yes.
-- `apply` (planned) has run, and `status` / `diff` agree with what was intended.
+- `apply --yes` has run after a reviewed dry run, and `status` / `diff` agree with what was intended.
 
 ## Preconditions
 
@@ -114,17 +114,24 @@ until it is cleared.
 ### 5. Dry-run
 
 ```sh
-python3 scripts/subwave.py apply --dry-run
+python3 scripts/subwave.py apply
 ```
 
-`apply` is **planned** (P3) and `--dry-run` is the only flag `AGENTS.md` documents. If the command
-does not exist in this checkout, stop and report that the repo side is ready and the apply step is
-missing — do not hand-craft admin `POST`s from a skill.
+`apply` dry-runs by default and sends nothing at all; `--dry-run` is accepted for emphasis. Read the
+step list it prints. Never hand-craft admin `POST`s from a skill.
 
 ### 6. Confirm, then apply
 
 Paste the dry-run summary together with the changed-cell list, and ask for an explicit yes. Only
-then apply, off-air if possible. Announce that the station is live when you do.
+then run it for real:
+
+```sh
+python3 scripts/subwave.py apply --yes
+```
+
+The write refuses while a show is on air unless you add `--force-now`, and at tier 1 unless you add
+`--no-backup`. Those refusals are the guards working: report them and let the human decide, never
+work around them. Announce that the station is live when you do write.
 
 ## Verify
 

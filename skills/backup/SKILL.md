@@ -105,7 +105,7 @@ credentials, so the directory deserves the same care as the host.
 The tool does not restore, and nothing in the repo should hand-edit live files while the controller
 runs. Restoring is a deliberate human-approved operation: put `settings.json` back through the admin
 API (`POST /api/settings`, whole sections) and `schedule.json` through `PUT /api/schedule`, the same
-path a reviewed `apply` will use (planned, P3). Until then, say plainly that the backup is verified
+path a reviewed `apply` uses. The tool does not restore, so say plainly that the backup is verified
 and the restore path is manual.
 
 ## Failure modes

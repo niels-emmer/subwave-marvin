@@ -27,8 +27,8 @@ or show — the operator's own data stays in gitignored `instance/`, referred to
 2. If two seem to fit, the verb decides: "why does the new show's host talk so much" is
    `explain-host` (diagnosis) and only becomes `new-show` if the user then asks to change the show.
 3. If none fit, do not improvise a procedure: read `AGENTS.md`, run
-   `python3 scripts/subwave.py status`, and ask. `apply` is planned, so a task that needs a write
-   may have to stop at the dry-run.
+   `python3 scripts/subwave.py status`, and ask. `apply` dry-runs by default and needs `--yes` to
+   write; its guards, not the skill, decide whether a write may proceed.
 4. Whichever skill loads, announce the tier it is running at and whether the station is on air
    before doing anything else.
 

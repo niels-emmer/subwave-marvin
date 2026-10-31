@@ -23,8 +23,8 @@ lives (inside `settings.json` on the host, split into files in the repo) and how
 - Someone wants persona tuning and has not decided what to change.
 
 Not for creating or scheduling a show ([`new-show`](../new-show/SKILL.md)), and not for backups
-([`backup`](../backup/SKILL.md)). If the human approves a change, this skill stops and the apply
-workflow (planned) takes over.
+([`backup`](../backup/SKILL.md)). If the human approves a change, this skill stops and the `apply`
+workflow takes over.
 
 ## Preconditions
 
@@ -150,8 +150,8 @@ are. If two changes are wanted, apply them one at a time so the effect is attrib
 
 ### 6. Hand off
 
-Give the human the exact JSON edit and ask. Applying is the write workflow's job (`apply` is
-planned) — this skill never writes, so nothing here can change what is on air.
+Give the human the exact JSON edit and ask. Applying is the write workflow's job (`apply --yes`) —
+this skill never writes, so nothing here can change what is on air.
 
 ## Verify (after someone applies it)
 

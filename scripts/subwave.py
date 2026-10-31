@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Read-only operations against a SUB/WAVE station.
+"""Operate a SUB/WAVE station from an agent session.
 
 Tiers:
   tier 1  HTTP only. Portable. Reads are trimmed by the server.
   tier 2  HTTP plus host access (ssh + docker exec). Full fidelity.
 
-Every command prints the tier it is running at. Nothing here writes to a station.
+Every command prints the tier it is running at. Writes are explicit and dry first:
+`apply` sends nothing without --yes, and an air-changing `onair` verb needs it too.
 
 Configuration comes from the environment, with a repo-root .env as a fallback:
   SUBWAVE_BASE_URL, SUBWAVE_ADMIN_USER, SUBWAVE_ADMIN_PASS,
@@ -255,6 +256,67 @@ def detect_tier(config, probe=None):
     return (2 if ok else 1), detail
 
 
+# Tier 2 needs two facts a newcomer cannot reasonably know: the controller
+# container's name, and the state dir's path *inside* it. Both are discoverable
+# from the host, so a bare host name should be enough to get started. One ssh
+# round trip, read-only, and a mount only counts when settings.json is already
+# there - guessing a path is how a tier-2 read silently becomes the wrong file.
+DISCOVER_SCRIPT = (
+    "for c in $(docker ps --format '{{.Names}}'); do "
+    "for d in $(docker inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' \"$c\" 2>/dev/null); do "
+    "if docker exec \"$c\" test -f \"$d/settings.json\" 2>/dev/null; then "
+    "echo \"FOUND $c $d\"; fi; done; done"
+)
+
+
+def discover_state_dirs(config):
+    """Find station state dirs on the host. Returns ([(container, dir)], note).
+
+    `note` is whatever the remote shell complained about, because "no container
+    found" and "ssh refused the key" must not read the same to the operator.
+    """
+    result = ssh_run(config, DISCOVER_SCRIPT)
+    found = []
+    for line in (result.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "FOUND":
+            pair = (parts[1], parts[2])
+            if pair not in found:
+                found.append(pair)
+    # The image default is the likeliest answer, so lead with it.
+    found.sort(key=lambda pair: pair[0] != DEFAULT_CONTAINER)
+    note = (result.stderr or "").strip().splitlines()
+    return found, (note[-1] if note else "")
+
+
+def _print_tier2_help(config):
+    """At tier 1, say how to reach tier 2 - and probe when we already can."""
+    if not config.host:
+        print("tier 2    not configured: no host access, so host and show details are trimmed")
+        print("          set SUBWAVE_HOST=<you>@<machine> and run status again: it finds the")
+        print("          controller container and its data directory for you")
+        return
+    try:
+        found, note = discover_state_dirs(config)
+    except (ToolError, ConfigError) as exc:
+        print("tier 2    could not probe %s: %s" % (config.host, exc))
+        return
+    if not found:
+        print("tier 2    no container on %s has a mounted settings.json" % config.host)
+        if note:
+            print("          the host said: %s" % note)
+        print("          check: ssh %s docker ps" % config.host)
+        return
+    container, state_dir = found[0]
+    print("tier 2    found container %s, data directory %s" % (container, state_dir))
+    print("          add to .env:")
+    print("            SUBWAVE_CONTAINER=%s" % container)
+    print("            SUBWAVE_STATE_DIR=%s" % state_dir)
+    if len(found) > 1:
+        others = ", ".join("%s:%s" % pair for pair in found[1:])
+        print("          other candidates: %s" % others)
+
+
 TIER_LABEL = {
     1: "1 - HTTP only (no host access)",
     2: "2 - host access (ssh + docker exec)",
@@ -449,6 +511,22 @@ def load_instance_model(root=None):
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def authored_capture():
+    """A lockfile capture record for instance/ that was authored, not captured.
+
+    `tier` records how the files were obtained from a station, so it is null
+    here: nothing was read. Claiming a tier would be the same class of lie as
+    degrading silently - only `lossy` gates a write, and this is never lossy.
+    """
+    return {
+        "tier": None,
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "lossy": False,
+        "lost": [],
+        "source": "authored",
+    }
 
 
 def write_instance(model, previous_lock=None, capture=None):
@@ -713,6 +791,8 @@ def cmd_status(config, args):
     print("tier      %s" % TIER_LABEL[tier], flush=True)
     print("why       %s" % detail)
     print("endpoint  %s" % (config.base_url or "(not set)"))
+    if tier == 1:
+        _print_tier2_help(config)
 
     active = (now or {}).get("activeShow") or {}
     track = (now or {}).get("nowPlaying") or {}
@@ -750,12 +830,16 @@ def cmd_status(config, args):
         print("backup    zip only - DOES NOT include shows or the grid")
 
     print("sync      %s" % _sync_line(config, tier, settings, schedule))
-    print("writes    none: this build is read-only")
+    print("writes    apply is a dry run unless --yes; onair verbs need --yes too")
     return EXIT_ERROR if api_failed else EXIT_OK
 
 
 def _sync_line(config, tier, settings, schedule):
     if not (INSTANCE_DIR / "ids.lock.json").is_file():
+        if tier == 1:
+            # A tier-1 pull of a live station is lossy and cannot be applied, so
+            # pointing a newcomer at it is the dead end this line used to be.
+            return "no instance/ yet - tier 1 authors: subwave.py character init"
         return "no instance/ captured yet (run: subwave.py pull)"
     if tier != 2 or settings is None:
         return "cannot compare at tier 1 (trimmed reads)"
@@ -1025,6 +1109,7 @@ def cmd_pull(config, args):
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "lossy": bool(losses),
         "lost": list(losses),
+        "source": "pull",
     }
     summary = write_instance(model, previous_lock, capture)
 
@@ -1988,7 +2073,7 @@ def cmd_apply(config, args):
         raise ToolError(
             "refusing to apply a lossy capture (tier %s): %s. A show trimmed to 7 fields pushed "
             "back would strip 19 fields per show on the live station. Re-pull with host access."
-            % (capture.get("tier"), lost))
+            % (capture.get("tier") or "unknown", lost))
 
     # validate first: a typo'd field would be silently dropped by a shallow merge
     report = validate_instance(None, station_moods=station_mood_names(config)
@@ -2881,8 +2966,7 @@ def cmd_character(config, args):
                 "personas": {persona_slug: persona["id"]},
                 "shows": {show_slug: show["id"]},
                 "ids": {persona["id"]: persona_slug, show["id"]: show_slug},
-                "capture": {"tier": 2, "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                            "lossy": False, "lost": []},
+                "capture": authored_capture(),
             })
             print("init      wrote a blank character (%s, %s)" % (persona_slug, show_slug))
         print("next      subwave.py validate")
@@ -3977,7 +4061,7 @@ def _onair_call(args):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="subwave.py",
-        description="Read-only operations against a SUB/WAVE station.",
+        description="Operate a SUB/WAVE station from an agent session: author, review, back up, apply.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

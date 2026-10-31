@@ -43,6 +43,10 @@ have been generating captures locally.
 
 ## Conventions
 
+The rules below are summarised; [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) says what they protect and
+why, and its **Invariants** section is the list a change has to survive. If a change cannot keep one of
+them, that is a design discussion, not a detail.
+
 - **Standard library only.** No third-party packages. A new dependency is a permanent,
   independently maintained liability; the suite has to run on a bare `python3`.
 - **Tests must never need a live station.** No network, no `ssh`, no credentials — that is why

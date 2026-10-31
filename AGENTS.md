@@ -70,12 +70,12 @@ table 19, repo doc 20, live 21): `tools/list` is the truth. Ids are server-gener
 
 - The station is **live**. Never apply config during a show you would not want to hear break: check
   `/api/now-playing` first, prefer an off-air window, and warn listeners with a DJ segment when in doubt.
+- **Not every setting applies live.** `privacy.listenerAuth` and `stream.maxListeners`/`opus`/`aac` take effect only on a **mixer restart**, where the controller regenerates the Icecast config and injects `ICECAST_MAX_CLIENTS`; one restart costs seconds of stream interruption, so bundle such changes. Passwords and everything else apply live.
 - Never commit secrets. `ADMIN_PASS`, the station password (`settings.privacy.password`), `ANTHROPIC_API_KEY`,
   and the keys inside `settings.json` (`llm.apiKey`, `llm.fallback.apiKey`, `tts.cloud.*`, `search.apiKey`,
   `embedding.apiKey`, `scrobble.*`) come from a gitignored `.env` or the macOS Keychain at apply time. `pull`
   redacts them; `apply` must never transmit the redaction sentinel.
-- Deletes (`DELETE /api/shows/:id`, `DELETE /api/personas/:id`) run only when the human asks, never as a side
-  effect of a sync.
+- Deletes (`DELETE /api/shows/:id`, `DELETE /api/personas/:id`) run only when the human asks, never as a side effect of a sync.
 - Do not start a second SUB/WAVE stack against the same state dir.
 
 ## Commands

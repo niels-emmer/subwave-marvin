@@ -75,6 +75,21 @@ whatever is playing.
 - **Anything that bypasses the station's review step for a skill's custom script** — the station refuses to
   run one until a person has read and trusted it, and nothing here shortcuts that.
 
+## What a session looks like
+
+```
+You:    add a host
+Agent:  Happy to. What is this host like - name, temperament, how they talk?
+You:    Ada Vance. Dry, unhurried, notices small things, never oversells a record.
+Agent:  Here is the host it built, with a soul in her voice. Before I put her on air,
+        which show should she present?
+You:    Sunday mornings
+Agent:  That fills Sun 07:00-10:00, taking one hour from Late Harbour. Nothing is live yet.
+        Say the word and I will push it.
+You:    go ahead
+Agent:  Applied, then read back from the station: one host, one show, three grid cells confirmed.
+```
+
 ## How it works
 
 Your station is described by the files in `instance/`. That directory is yours alone — it is excluded from
@@ -95,34 +110,18 @@ mid-sentence:
 
 That second path is the only one that skips the review, and it never touches your files or your history.
 
-## Setting it up
+## Getting started
 
 You need `python3` (nothing to install), your station, and its admin username and password. Copy
 `.env.example` to `.env` and fill it in, then ask your agent for the station's status.
+
+No station yet? `character init --from demo` writes a small fictional station into `instance/`, so you can
+walk the whole flow — edit, validate, dry run — without one.
 
 One honest note. With only the station's web address you get a partial picture: the API trims host and show
 details, and a backup cannot include your shows or the weekly grid. If your agent can also reach the machine
 the station runs on, tell it the ssh host and the data directory — then you get the whole thing, including a
 backup that can restore the programming. Worth doing before you change anything.
-
-## A sample session
-
-> **You:** Add a host. A late-night one, dry, doesn't oversell anything.
->
-> **Agent:** Before I scaffold them, two things: what are they called, and what do they actually sound
-> like? The soul field is the prompt the DJ writes from, so a thin description gives you a thin presenter.
->
-> **You:** Nell, I suppose. Talks about the weather and the tide. Understated. Never says "amazing".
->
-> **Agent:** Wrote `instance/character/personas/nell.json` with that soul, and dialled warmth up and humour
-> down to match. Validate passes, and nothing is on the station yet. To put her on air I'd give her a show —
-> want me to create "Late Harbour", midnight to six, taking those hours from what's there now? That moves
-> three grid cells.
->
-> **You:** Yes.
->
-> **Agent:** Dry run: one persona, one show, three grid cells. Sending now — done, and read back from the
-> station to confirm all three landed.
 
 ## Safety, short
 
@@ -161,9 +160,10 @@ Flags live here rather than in the body: `apply` also takes `--force-now` (write
 `--allow-lossy` for a partial copy. Every `onair` verb that changes air needs `--yes`; `skip` needs
 `--expect-id` or `--any-track`.
 
-`examples/demo/` is a fictional station in the same shape as `instance/`, so you can try any of this without
-a station of your own. `instance/skills/` holds the station's own DJ segments; `skills/` at the top of the
-repo holds the procedures your agent follows. They are different things.
+Two directories are called `skills/`, and they are different things:
+
+- `skills/` at the top of the repo — the procedures your agent follows when it works here.
+- `instance/skills/` — your station's own DJ segments, the ones that go to air.
 
 ## Where to read more
 

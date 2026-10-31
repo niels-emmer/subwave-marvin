@@ -1,0 +1,418 @@
+{
+  "settings": {
+    "station": "Harbour Lights",
+    "stationDescription": "A small coastal station playing records for people who are awake when the town is not.",
+    "locale": "en-GB",
+    "timezone": "Europe/Lisbon",
+    "theme": "classic-dark",
+    "djHouseRules": [
+      "Speak like a person on a small local station, not like a presenter on a national one.",
+      "Never mention being an AI, a model, or a program.",
+      "No politics, no medical, legal or financial advice.",
+      "Keep talk under forty-five seconds and never announce the same record twice in one hour."
+    ],
+    "djPrompt": "",
+    "djPrompts": [],
+    "personas": [
+      {
+        "id": "p_demo-ivo",
+        "name": "Ivo Marsh",
+        "tagline": "first light, first record",
+        "frequency": "chatty",
+        "scriptLength": "storyteller",
+        "djMode": true,
+        "linkStyle": "natural",
+        "humour": 9,
+        "localColour": 7,
+        "warmth": 3,
+        "soul": "IDENTITY\nYou are Ivo Marsh, the early-morning host. You are brisk, dry and faintly impatient with sentiment before seven.\n\nVOICE\nYou tell small stories about the town waking up: the bakery, the ferry, whoever is already queuing. You tease the audience gently and never linger. One idea per link, then the record.\n\nCATCHPHRASES\n\"Right. Off we go.\" / \"That is the news from the harbour wall.\"",
+        "musicLean": [
+          "soul",
+          "pop"
+        ],
+        "language": "",
+        "voiceStyle": "",
+        "avatar": "",
+        "tts": {
+          "engine": "kokoro",
+          "cloudProvider": "",
+          "voice": "bm_daniel",
+          "gainDb": 0,
+          "speed": 1
+        },
+        "skills": [],
+        "tags": [
+          "demo",
+          "morning"
+        ]
+      },
+      {
+        "id": "p_demo-nell",
+        "name": "Nell Harrow",
+        "tagline": "keeps the lights on",
+        "frequency": "moderate",
+        "scriptLength": "concise",
+        "djMode": true,
+        "linkStyle": "natural",
+        "humour": 6,
+        "localColour": 4,
+        "warmth": 8,
+        "soul": "IDENTITY\nYou are Nell Harrow, the late-night host on a small coastal station. You have been doing this shift for years and you like it. You are warm, unhurried, and slightly amused by everything.\n\nVOICE\nShort sentences. Understatement. You talk about weather, tide times and the town as if the listener is standing next to you. You never oversell a record; you just say why it belongs at this hour.\n\nCATCHPHRASES\n\"Still up, then.\" / \"This one suits the hour.\"",
+        "musicLean": [
+          "ambient",
+          "soul",
+          "jazz"
+        ],
+        "language": "",
+        "voiceStyle": "",
+        "avatar": "",
+        "tts": {
+          "engine": "kokoro",
+          "cloudProvider": "",
+          "voice": "bm_george",
+          "gainDb": 0,
+          "speed": 1
+        },
+        "skills": [],
+        "tags": [
+          "demo",
+          "late-night"
+        ]
+      }
+    ],
+    "activePersonaId": "p_demo-ivo",
+    "privacy": {
+      "privatePlayer": true,
+      "listenerAuth": false,
+      "publishPersonaSouls": false,
+      "password": ""
+    },
+    "llm": {
+      "provider": "anthropic",
+      "model": "some-model",
+      "apiKey": "",
+      "fallback": {
+        "apiKey": ""
+      },
+      "dailyTokenCap": 0
+    },
+    "tts": {
+      "enabled": true,
+      "defaultEngine": "kokoro",
+      "cloud": {
+        "apiKey": "",
+        "compatApiKey": ""
+      }
+    },
+    "search": {
+      "apiKey": ""
+    },
+    "embedding": {
+      "apiKey": ""
+    },
+    "scrobble": {
+      "lastfm": {
+        "apiKey": "",
+        "apiSecret": "",
+        "sessionKey": ""
+      },
+      "listenbrainz": {
+        "userToken": ""
+      }
+    },
+    "stream": {
+      "maxListeners": 8,
+      "bitrate": 192,
+      "flacEnabled": true,
+      "bufferSeconds": 22,
+      "idleWhenEmpty": true
+    },
+    "requests": {
+      "enabled": true,
+      "maxPending": 6
+    },
+    "skills": {
+      "enabled": {
+        "demo-skill": true
+      }
+    }
+  },
+  "schedule": {
+    "shows": [
+      {
+        "id": "s_demo-first",
+        "name": "First Light",
+        "topic": "The town waking up: bright soul and pop, short links, no lingering before seven.",
+        "personaId": "p_demo-ivo",
+        "guestPersonaIds": [],
+        "banter": false,
+        "pauseTalk": true,
+        "programme": true,
+        "segmentSkill": "",
+        "preparationSkill": "",
+        "moods": [
+          "morning",
+          "sunny"
+        ],
+        "themeId": "classic-dark",
+        "genres": [
+          "soul",
+          "pop"
+        ],
+        "energies": [
+          "medium",
+          "high"
+        ],
+        "eras": [
+          {
+            "fromYear": 1990,
+            "toYear": 2015
+          }
+        ],
+        "vocals": "",
+        "filtersStrict": false,
+        "maxTrackSeconds": 420,
+        "minTrackLengthSeconds": 90,
+        "fadeAtShowEnd": false,
+        "playlistIds": [],
+        "playlistStrict": false,
+        "playlistExhaust": false,
+        "playlistInOrder": false,
+        "excludedPlaylistIds": [],
+        "tags": [
+          "demo"
+        ]
+      },
+      {
+        "id": "s_demo-late",
+        "name": "Late Harbour",
+        "topic": "Records for the hours when the town is asleep: slow soul, ambient, and jazz that does not hurry.",
+        "personaId": "p_demo-nell",
+        "guestPersonaIds": [],
+        "banter": false,
+        "pauseTalk": true,
+        "programme": true,
+        "segmentSkill": "",
+        "preparationSkill": "",
+        "moods": [
+          "night",
+          "reflective"
+        ],
+        "themeId": "classic-dark",
+        "genres": [
+          "ambient",
+          "soul",
+          "jazz"
+        ],
+        "energies": [
+          "low",
+          "medium"
+        ],
+        "eras": [
+          {
+            "fromYear": 1980,
+            "toYear": 2005
+          }
+        ],
+        "vocals": "",
+        "filtersStrict": false,
+        "maxTrackSeconds": 600,
+        "minTrackLengthSeconds": 90,
+        "fadeAtShowEnd": true,
+        "playlistIds": [],
+        "playlistStrict": false,
+        "playlistExhaust": false,
+        "playlistInOrder": false,
+        "excludedPlaylistIds": [],
+        "tags": [
+          "demo"
+        ]
+      }
+    ],
+    "schedule": {
+      "0": [
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first"
+      ],
+      "1": [
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first"
+      ],
+      "2": [
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first"
+      ],
+      "3": [
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first"
+      ],
+      "4": [
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first"
+      ],
+      "5": [
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first"
+      ],
+      "6": [
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-late",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first",
+        "s_demo-first"
+      ]
+    },
+    "override": null
+  }
+}

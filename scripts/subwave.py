@@ -580,6 +580,15 @@ def _wire_shape(item):
     return {key: value for key, value in item.items() if key != "slug"}
 
 
+def compare_skills(repo, live):
+    added = sorted(set(repo) - set(live))
+    removed = sorted(set(live) - set(repo))
+    changed = sorted(slug for slug in set(repo) & set(live)
+                     if repo[slug]["text"].strip() != live[slug]["text"].strip())
+    return {"added": added, "removed": removed, "changed": changed,
+            "unchanged": sorted((set(repo) & set(live)) - set(changed))}
+
+
 def compare_blocklist(repo, live):
     """Same added/removed/changed shape as personas and shows."""
     report = {}
@@ -620,6 +629,22 @@ def print_blocklist_diff(report):
                  len(part["unchanged"]), len(part["changed"]),
                  len(part["added"]), len(part["removed"]),
                  "  (" + "; ".join(detail) + ")" if detail else ""))
+
+
+def print_skill_diff(report):
+    detail = []
+    for label in ("changed", "added", "removed"):
+        if report[label]:
+            detail.append("%s: %s" % (label, ", ".join(report[label])))
+    print("%-10s%d unchanged, %d changed, %d added, %d removed%s"
+          % ("skills", len(report["unchanged"]), len(report["changed"]),
+             len(report["added"]), len(report["removed"]),
+             "  (" + "; ".join(detail) + ")" if detail else ""))
+
+
+def load_live_skills(config, tier):
+    captured, _ = pull_skills(config, tier)
+    return {slug: {"text": text} for slug, text in captured.items()}
 
 
 def print_diff(report):
@@ -1023,6 +1048,14 @@ def cmd_pull(config, args):
     print("wrote     instance/ (%d files + ids.lock.json)" % summary["files"])
     print("blocklist %d entries, %d rules"
           % (len(blocklist["entries"]), len(blocklist["rules"])))
+
+    captured_skills, builtin_skills = pull_skills(config, tier)
+    write_repo_skills(captured_skills)
+    print("skills    %d custom captured%s"
+          % (len(captured_skills),
+             "" if not builtin_skills else
+             " (%d built-in not captured: they are the image's, not the operator's)"
+             % len(builtin_skills)))
     print("redacted  %d of %d configured paths held a value -> %s"
           % (summary["redacted"], len(REDACT_PATHS), SENTINEL))
     print("personas  %d" % summary["personas"])
@@ -1083,9 +1116,14 @@ def cmd_diff(config, args):
         (INSTANCE_DIR / "ids.lock.json").read_text(encoding="utf-8")))
     blocklist_report = compare_blocklist(repo_blocklist, live_blocklist)
     print_blocklist_diff(blocklist_report)
+    skills_report = {"added": [], "removed": [], "changed": [], "unchanged": []}
+    if skills_root().is_dir():
+        skills_report = compare_skills(load_repo_skills(), load_live_skills(config, 1))
+        print_skill_diff(skills_report)
     count = drift_count(report)
     count += sum(len(blocklist_report[kind][label]) for kind in ("entries", "rules")
                  for label in ("added", "removed", "changed"))
+    count += sum(len(skills_report[label]) for label in ("added", "removed", "changed"))
     print("result    %s" % ("in sync" if count == 0 else "%d change(s)" % count))
     return EXIT_OK if count == 0 else EXIT_DRIFT
 
@@ -1383,6 +1421,10 @@ def diff_trimmed(config, repo):
         (INSTANCE_DIR / "ids.lock.json").read_text(encoding="utf-8")))
     blocklist_report = compare_blocklist(load_repo_blocklist(), live_blocklist)
     print_blocklist_diff(blocklist_report)
+    skills_report = {"added": [], "removed": [], "changed": [], "unchanged": []}
+    if skills_root().is_dir():
+        skills_report = compare_skills(load_repo_skills(), load_live_skills(config, 1))
+        print_skill_diff(skills_report)
     count = (len(report["personas"]["added"]) + len(report["personas"]["removed"])
              + len(report["personas"]["changed"]) + len(report["shows"]["added"])
              + len(report["shows"]["removed"]) + len(report["shows"]["changed"])
@@ -1391,6 +1433,7 @@ def diff_trimmed(config, repo):
         count += 1
     count += sum(len(blocklist_report[kind][label]) for kind in ("entries", "rules")
                  for label in ("added", "removed", "changed"))
+    count += sum(len(skills_report[label]) for label in ("added", "removed", "changed"))
     print("result    %s" % ("in sync on the readable fields only (not a full match)"
                             if count == 0
                             else "%d change(s) in the readable fields" % count))
@@ -1667,13 +1710,14 @@ def build_grid(model, lock):
     return {"schedule": grid, "override": override}, sorted(set(unresolved))
 
 
-def payload_hash(steps, grid_body, blocklist=None):
-    """Everything apply writes, so a blocklist-only edit is not read as no-op."""
+def payload_hash(steps, grid_body, blocklist=None, skills=None):
+    """Everything apply writes, so a blocklist- or skill-only edit is not a no-op."""
     blob = json.dumps(
         {"steps": [{"method": step["method"], "path": step["path"], "body": step["body"]}
                    for step in steps],
          "grid": grid_body,
-         "blocklist": blocklist or {}},
+         "blocklist": blocklist or {},
+         "skills": skills or {}},
         sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -2016,7 +2060,8 @@ def cmd_apply(config, args):
         prune_settings_before = json.loads(read_state_file(config, "settings.json"))
         prune_schedule_before = json.loads(read_state_file(config, "schedule.json"))
 
-    digest = payload_hash(steps, grid_body, repo_blocklist)
+    repo_skills_text = {slug: entry["text"] for slug, entry in load_repo_skills().items()}
+    digest = payload_hash(steps, grid_body, repo_blocklist, repo_skills_text)
     applied = lock.get("applied") or {}
     if applied.get("hash") == digest and not args.prune:
         print("result    no changes since the last apply (%s)" % applied.get("at"))
@@ -2050,12 +2095,15 @@ def cmd_apply(config, args):
         print("pending   rule %r is in the lock but not in the file; apply does not delete "
               "(that is the deletes task)" % slug)
     apply_blocklist(config, repo_blocklist, blocklist_lock)
+    apply_skills(config, load_repo_skills())
 
     # The writes succeeded, so record that before anything else can fail: a
     # verification that throws must not erase the fact that the station changed.
     lock["applied"] = {
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "hash": payload_hash(build_steps(model, lock), grid_body, load_repo_blocklist()),
+        "hash": payload_hash(build_steps(model, lock), grid_body, load_repo_blocklist(),
+                             {slug: entry["text"]
+                              for slug, entry in load_repo_skills().items()}),
         "tier": tier,
     }
     write_json(lock_path, lock)
@@ -2292,6 +2340,8 @@ def validate_instance(root=None):
                                       "a show file" % (day, hour, cell))
                     else:
                         counts["filled"] += 1
+
+    validate_skills(root, errors, warnings)
 
     blocklist_path = root / BLOCKLIST_FILE
     if blocklist_path.is_file():
@@ -3297,6 +3347,300 @@ def cmd_blocklist_rule(config, args):
     raise ToolError("unknown rule command %r" % action)
 
 
+# --------------------------------------------------------------------------
+# station skills: the DJ's real-world segments
+#
+# NOT to be confused with skills/ at the repo root, which holds AGENT
+# procedures. These are the station's own skills: instance/skills/<slug>/SKILL.md,
+# operator content like personas and shows.
+#
+# tool.mjs is deliberately NOT managed here. The station quarantines new tool
+# code as tool.mjs.pending and only runs it after a human reviews it and POSTs
+# the sha256 to /dj/skills/:slug/tool/trust. A git apply that installed and
+# trusted arbitrary JavaScript would bypass that boundary, so the toolkit stays
+# out of it and says so.
+# --------------------------------------------------------------------------
+
+STATION_SKILLS_DIR = "skills"
+SKILL_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
+SKILL_COOLDOWN_RE = re.compile(r"^[0-9]+(?:m|h|d)?$")
+SKILL_REQUIRED = ("name", "label", "cooldown")
+
+
+def skills_root(root=None):
+    return Path(root or INSTANCE_DIR) / STATION_SKILLS_DIR
+
+
+def parse_skill_md(text):
+    """(frontmatter dict, body). A missing block is an error, not a warning."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ToolError("SKILL.md must open with a --- frontmatter block")
+    try:
+        end = next(index for index, line in enumerate(lines[1:], start=1)
+                   if line.strip() == "---")
+    except StopIteration:
+        raise ToolError("SKILL.md frontmatter is not closed with ---")
+    data = {}
+    for line in lines[1:end]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if ":" not in line:
+            raise ToolError("SKILL.md frontmatter line is not key: value (%r)" % line)
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip().strip('"').strip("'")
+    body = "\n".join(lines[end + 1:]).strip()
+    return data, body
+
+
+def render_skill_md(data, body):
+    lines = ["---"]
+    for key, value in data.items():
+        lines.append("%s: %s" % (key, value))
+    lines.append("---")
+    lines.append("")
+    lines.append(body.strip())
+    return "\n".join(lines) + "\n"
+
+
+def load_repo_skills(root=None):
+    """{slug: {"data", "body", "text"}} for every skill in instance/skills."""
+    base = skills_root(root)
+    skills = {}
+    if not base.is_dir():
+        return skills
+    for path in sorted(base.glob("*/SKILL.md")):
+        text = path.read_text(encoding="utf-8")
+        try:
+            data, body = parse_skill_md(text)
+        except ToolError:
+            data, body = None, None
+        skills[path.parent.name] = {"data": data, "body": body, "text": text}
+    return skills
+
+
+def builtin_skill_slugs(config, state):
+    """The slugs the image ships, read from the container.
+
+    Returns None when the container cannot be asked: capturing a built-in into
+    the operator's layer is worse than capturing no skills at all, so the caller
+    skips rather than guesses.
+    """
+    try:
+        for candidate in ("/app/src/skills/builtins", "/app/dist/skills/builtins"):
+            result = ssh_run(config, "docker exec %s sh -c 'ls %s 2>/dev/null'"
+                             % (config.container, candidate))
+            names = [line.strip() for line in (result.stdout or "").splitlines()
+                     if line.strip()]
+            if names:
+                return set(names)
+    except (ToolError, ConfigError):
+        return None
+    return None
+
+
+def pull_skills(config, tier):
+    """Custom station skills. Built-ins are the image's content, not the operator's."""
+    captured, skipped_builtin = {}, []
+    if tier == 2:
+        state = SshStateSource(config)
+        builtins = builtin_skill_slugs(config, state)
+        if builtins is None:
+            # Without the shipped list we cannot tell a built-in from a custom
+            # skill, and capturing the image's own skills as operator content
+            # would be wrong. Skip, loudly.
+            return {}, []
+        for relative in state.list_files():
+            parts = relative.split("/")
+            if len(parts) == 3 and parts[0] == "skills" and parts[2] == "SKILL.md":
+                slug = parts[1]
+                if slug in builtins:
+                    skipped_builtin.append(slug)
+                    continue
+                captured[slug] = state.read_bytes(relative).decode("utf-8")
+    else:
+        status, payload = http_json(config, "/api/dj/skills", admin=True)
+        if status != 200:
+            raise ToolError("GET /api/dj/skills returned HTTP %s" % status)
+        for skill in (payload or {}).get("skills") or []:
+            slug = skill.get("kind") or skill.get("slug")
+            if not slug:
+                continue
+            if skill.get("seeded"):
+                skipped_builtin.append(slug)
+                continue
+            file_status, file = http_json(config, "/api/dj/skills/%s/file" % slug, admin=True)
+            if file_status != 200:
+                raise ToolError("GET /api/dj/skills/%s/file returned HTTP %s"
+                                % (slug, file_status))
+            data = {"name": slug}
+            for key in ("label", "cooldown", "cron", "context", "tags", "window", "requiresKey"):
+                value = file.get(key)
+                if value not in (None, "", []):
+                    data[key] = ", ".join(value) if isinstance(value, list) else value
+            captured[slug] = render_skill_md(data, file.get("brief") or "")
+    return captured, skipped_builtin
+
+
+def write_repo_skills(captured, root=None):
+    base = skills_root(root)
+    if base.exists():
+        shutil.rmtree(base)
+    for slug, text in captured.items():
+        path = base / slug / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def validate_skills(root, errors, warnings):
+    base = skills_root(root)
+    if not base.is_dir():
+        return
+    for directory in sorted(path for path in base.iterdir() if path.is_dir()):
+        slug = directory.name
+        path = directory / "SKILL.md"
+        if not path.is_file():
+            errors.append("skills/%s: no SKILL.md" % slug)
+            continue
+        if not SKILL_SLUG_RE.match(slug):
+            errors.append("skills/%s: directory name is not a valid skill slug "
+                          "(^[a-z0-9][a-z0-9-]{0,48}$)" % slug)
+        try:
+            data, body = parse_skill_md(path.read_text(encoding="utf-8"))
+        except ToolError as exc:
+            errors.append("skills/%s/SKILL.md: %s" % (slug, exc))
+            continue
+        for field in SKILL_REQUIRED:
+            if not data.get(field):
+                errors.append("skills/%s/SKILL.md: missing frontmatter field %r" % (slug, field))
+        if data.get("name") and data["name"] != slug:
+            errors.append("skills/%s/SKILL.md: name %r does not match the directory"
+                          % (slug, data["name"]))
+        cooldown = data.get("cooldown")
+        if cooldown and not SKILL_COOLDOWN_RE.match(cooldown):
+            errors.append("skills/%s/SKILL.md: cooldown %r must look like \"45m\", \"6h\", "
+                          "\"2d\", or a bare number of minutes" % (slug, cooldown))
+        if not body.strip():
+            errors.append("skills/%s/SKILL.md: the prompt body is empty" % slug)
+        if (directory / "tool.mjs").exists():
+            warnings.append("skills/%s/tool.mjs is not managed by this toolkit: the station "
+                            "quarantines tool code behind its pending/trust review" % slug)
+
+
+SKILL_WIRE_FIELDS = ("label", "cooldown", "cron", "context", "tags", "window", "requiresKey")
+
+
+def skill_wire_body(slug, entry, for_create=False):
+    """Only the fields the station's schema knows. Unknown frontmatter (a tool's
+    own knobs) stays in the repo and is not sent."""
+    data = entry.get("data") or {}
+    body = {key: data[key] for key in SKILL_WIRE_FIELDS if key in data}
+    body["brief"] = entry.get("body") or ""
+    if for_create:
+        body["name"] = slug
+    return body
+
+
+def apply_skills(config, repo_skills):
+    """Create with POST, update with PUT. Never deletes: that is prune's job, and
+    prune does not cover skills yet."""
+    status, payload = http_json(config, "/api/dj/skills", admin=True)
+    if status != 200:
+        raise ToolError("GET /api/dj/skills returned HTTP %s" % status)
+    existing = {skill.get("kind") or skill.get("slug"): skill
+                for skill in (payload or {}).get("skills") or []}
+
+    for slug, entry in sorted(repo_skills.items()):
+        current = existing.get(slug)
+        if current and current.get("seeded"):
+            print("skipped   skill %r is built-in; the toolkit does not write those" % slug)
+            continue
+        if current:
+            code, response = http_json(config, "/api/dj/skills/%s/file" % slug, admin=True,
+                                       method="PUT", body=skill_wire_body(slug, entry))
+            verb = "updated"
+        else:
+            code, response = http_json(config, "/api/dj/skills", admin=True, method="POST",
+                                       body=skill_wire_body(slug, entry, for_create=True))
+            verb = "created"
+        if code >= 400:
+            detail = ""
+            if isinstance(response, dict):
+                detail = response.get("error") or ""
+            raise ToolError("%s skill %r failed: HTTP %s %s" % (verb, slug, code, detail))
+        print("skill     %s %s" % (verb, slug))
+
+
+def cmd_skills(config, args):
+    """Local file edits, like `character` and `blocklist`."""
+    root = INSTANCE_DIR
+    base = skills_root(root)
+    action = args.skills_command
+    skills = load_repo_skills(root)
+
+    if action == "list":
+        if not skills:
+            print("skill     (none captured)")
+        for slug, entry in sorted(skills.items()):
+            data = entry.get("data") or {}
+            print("skill     %-24s %-16s %s" % (slug, data.get("cooldown") or "-",
+                                               data.get("label") or ""))
+        return EXIT_OK
+
+    if action == "show":
+        entry = skills.get(args.slug)
+        if entry is None:
+            raise ToolError("no skill %r; known: %s" % (args.slug, ", ".join(sorted(skills))
+                                                        or "none"))
+        print(entry["text"])
+        return EXIT_OK
+
+    if action == "new":
+        slug = args.slug
+        if not SKILL_SLUG_RE.match(slug):
+            raise ToolError("%r is not a valid skill slug (^[a-z0-9][a-z0-9-]{0,48}$)" % slug)
+        if (base / slug).exists():
+            raise ToolError("skill %r already exists" % slug)
+        data = {"name": slug, "label": title_from_slug(slug), "cooldown": "60m"}
+        body = ("TODO: what this segment does, when it should fire, and how the DJ should "
+                "sound doing it.")
+        path = base / slug / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_skill_md(data, body), encoding="utf-8")
+        print("skill     created %s" % slug)
+        print("next      fill in the prompt, then: subwave.py validate")
+        return EXIT_OK
+
+    if action == "edit":
+        entry = skills.get(args.slug)
+        if entry is None:
+            raise ToolError("no skill %r; known: %s" % (args.slug, ", ".join(sorted(skills))
+                                                        or "none"))
+        data = dict(entry.get("data") or {})
+        body = entry.get("body") or ""
+        if args.label is not None:
+            data["label"] = args.label
+        if args.cooldown is not None:
+            data["cooldown"] = args.cooldown
+        if args.brief is not None:
+            body = args.brief
+        path = base / args.slug / "SKILL.md"
+        path.write_text(render_skill_md(data, body), encoding="utf-8")
+        print("skill     edited %s" % args.slug)
+        return EXIT_OK
+
+    if action == "rm":
+        path = base / args.slug
+        if not path.is_dir():
+            raise ToolError("no skill %r" % args.slug)
+        shutil.rmtree(path)
+        print("skill     removed %s (locally)" % args.slug)
+        print("note      apply does not delete station skills; prune does not cover them yet")
+        return EXIT_OK
+
+    raise ToolError("unknown skills command %r" % action)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="subwave.py",
@@ -3315,6 +3659,26 @@ def build_parser():
 
     diff = sub.add_parser("diff", help="read-only drift report")
     diff.set_defaults(func=cmd_diff)
+
+    skills_cmd = sub.add_parser("skills", help="author station skills locally (no network)")
+    skills_sub = skills_cmd.add_subparsers(dest="skills_command", required=True)
+    skills_list = skills_sub.add_parser("list", help="captured station skills")
+    skills_list.set_defaults(func=cmd_skills)
+    skills_new = skills_sub.add_parser("new", help="scaffold a skill")
+    skills_new.add_argument("slug")
+    skills_new.set_defaults(func=cmd_skills)
+    skills_show = skills_sub.add_parser("show", help="print a skill's SKILL.md")
+    skills_show.add_argument("slug")
+    skills_show.set_defaults(func=cmd_skills)
+    skills_edit = skills_sub.add_parser("edit", help="change a skill's fields")
+    skills_edit.add_argument("slug")
+    skills_edit.add_argument("--label")
+    skills_edit.add_argument("--cooldown")
+    skills_edit.add_argument("--brief")
+    skills_edit.set_defaults(func=cmd_skills)
+    skills_rm = skills_sub.add_parser("rm", help="remove a skill locally")
+    skills_rm.add_argument("slug")
+    skills_rm.set_defaults(func=cmd_skills)
 
     blocklist = sub.add_parser("blocklist", help="author the blocklist locally (no network)")
     bl_sub = blocklist.add_subparsers(dest="blocklist_command", required=True)

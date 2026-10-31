@@ -104,6 +104,14 @@ every show and the whole grid do not. So `backup` copies the config **and** thos
   `instance/blocklist.lock.json`.** The station mints the uuid; without the lock every apply would POST a
   new one for the same rule, filling RULES_MAX=50 with near-duplicates while `matchCount` still looked
   plausible. Never POST a rule that already has a uuid, and never send the slug to the station.
+- **Station skills are operator content; built-ins are not.** `pull` captures only custom skills — the
+  image's built-ins (read from `src/skills/builtins` in the container) are skipped, because they are not
+  the operator's. `apply` creates with `POST /api/dj/skills` and updates with `PUT /dj/skills/:slug/file`,
+  and never deletes (prune does not cover skills yet). Enabling and disabling is `settings.skills.enabled`,
+  which apply already sends.
+- **`tool.mjs` is not managed.** The station quarantines new tool code as `tool.mjs.pending` and runs it
+  only after a human reviews it and posts the sha256 to `/dj/skills/:slug/tool/trust`. A toolkit that
+  installed and trusted it would bypass that boundary.
 - **The blocklist is a config document, not an asset.** It lives at `${STATE_DIR}/blocklist.json` and the
   station's own API zip omits it, so a stock export/restore silently loses every ban. `pull` reads it over
   admin HTTP at both tiers (the one entity tier 1 captures losslessly), `backup` carries it, `restore`
@@ -155,6 +163,7 @@ python3 scripts/subwave.py backup    # config + assets, outside the repo
 python3 scripts/subwave.py restore <dir>  # put a backup back (dry run; --yes writes)
 python3 scripts/subwave.py validate  # check instance/ before applying (--dir DIR for any station)
 python3 scripts/subwave.py blocklist list|block|unblock|rm|rule   # author locally (no network)
+python3 scripts/subwave.py skills list|new|show|edit|rm           # station skills (no network)
 python3 scripts/subwave.py character init --from demo   # scaffold a character layer (no network)
 python3 scripts/subwave.py character new-persona|new-show|add-to-grid   # author personas, shows, grid
 python3 scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE  # change named fields only
@@ -163,7 +172,11 @@ python3 scripts/subwave.py apply     # DRY RUN by default; --yes performs the wr
 
 ## Layout
 
+`skills/` at the repo root holds AGENT procedures — how an agent works this repo. `instance/skills/`
+holds STATION skills — the DJ's segments (`<slug>/SKILL.md`). They are different things; do not merge them.
+
 `instance/` is this deployment and is gitignored: `settings.json` (secrets redacted),
+`skills/<slug>/SKILL.md` (station skills: frontmatter + prompt),
 `blocklist.json` (the third config document: bans and rules),
 `character/character.json` for identity and house rules, `character/personas/*.json`,
 `character/shows/*.json`, `character/schedule.json` (the grid keyed by slug), and

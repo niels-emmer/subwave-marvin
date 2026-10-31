@@ -137,13 +137,16 @@ class GridTests(ValidateTestCase):
         self.assertEqual(code, 1)
         self.assertIn("no-such-show", output)
 
-    def test_empty_cell_is_an_error(self):
+    def test_empty_cell_is_legal(self):
+        # An empty hour means the station runs autonomously for that hour
+        # (Admin & Settings > Shows). Rejecting it blocked a console action.
         def mutate(document):
             document["schedule"]["3"][5] = None
         self.edit("character", "schedule.json", mutate=mutate)
         code, output = self.run_validate()
-        self.assertEqual(code, 1)
-        self.assertIn("empty", output)
+        self.assertEqual(code, 0, output)
+        self.assertIn("1 empty", output)
+        self.assertIn("runs autonomously", output)
 
 
 class LockTests(ValidateTestCase):

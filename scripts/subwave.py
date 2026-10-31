@@ -346,6 +346,22 @@ def redact(settings):
 IDENTITY_KEYS = ("station", "stationDescription", "locale", "timezone", "theme", "djHouseRules")
 
 
+def normalise_grid(grid):
+    """7 days x 24 cells, with None for an empty hour.
+
+    The station accepts null, "" and an absent day for "nothing" (schemas/
+    schedule.ts), and stores null. Normalising here means pull round-trips a
+    station with holes, and a blank day is 24 explicit nulls rather than a
+    missing key.
+    """
+    week = {}
+    for day in range(7):
+        cells = (grid or {}).get(str(day)) or []
+        week[str(day)] = [cells[index] if index < len(cells) else None
+                          for index in range(24)]
+    return week
+
+
 def strip_settings(settings):
     """What belongs in instance/settings.json: no personas, no shows, no identity."""
     return {k: v for k, v in settings.items()
@@ -357,6 +373,11 @@ def character_from(settings):
     djHouseRules as a string (often empty), while the character layer wants one
     rule per list item."""
     character = {name: copy.deepcopy(settings.get(source)) for name, source in CHARACTER_FIELDS}
+    # The station stores theme as {"active": id}; the character layer holds the id.
+    theme = character.get("theme")
+    if isinstance(theme, dict):
+        character["theme"] = theme.get("active")
+
     rules = character.get("houseRules")
     if isinstance(rules, str):
         # The station stores djHouseRules as one newline-joined string. Pulling
@@ -377,7 +398,7 @@ def build_live_model(settings, schedule):
         "character": character_from(redacted),
         "personas": {p["id"]: p for p in (redacted.get("personas") or []) if p.get("id")},
         "shows": {s["id"]: s for s in (schedule.get("shows") or []) if s.get("id")},
-        "grid": schedule.get("schedule") or {},
+        "grid": normalise_grid(schedule.get("schedule")),
         "override": schedule.get("override"),
         "activePersonaId": redacted.get("activePersonaId"),
         "redacted": count,
@@ -1615,7 +1636,7 @@ def validate_instance(root=None):
     """
     root = Path(root or INSTANCE_DIR)
     errors, warnings, unreadable = [], [], []
-    counts = {"personas": 0, "shows": 0, "cells": 0, "filled": 0}
+    counts = {"personas": 0, "shows": 0, "cells": 0, "filled": 0, "empty": 0}
 
     lock = _load_json(root / "ids.lock.json", unreadable)
 
@@ -1681,8 +1702,10 @@ def validate_instance(root=None):
                 counts["cells"] += len(cells)
                 for hour, cell in enumerate(cells):
                     if cell in (None, ""):
-                        errors.append("schedule.json: day %s hour %02d is empty; every cell "
-                                      "must name a show" % (day, hour))
+                        # An empty hour is legal: the station runs autonomously
+                        # for that hour (Admin & Settings > Shows). Rejecting it
+                        # blocked a legitimate console action.
+                        counts["empty"] += 1
                     elif cell not in shows:
                         errors.append("schedule.json: day %s hour %02d names %r, which is not "
                                       "a show file" % (day, hour, cell))
@@ -1761,9 +1784,11 @@ def cmd_validate(config, args):
         print("result    %d error(s), %d warning(s) - fix the errors before applying"
               % (len(result["errors"]), len(result["warnings"])))
         return EXIT_ERROR
-    print("result    ok (%d personas, %d shows, %d/%d cells filled), %d warning(s)"
-          % (counts["personas"], counts["shows"], counts["filled"], counts["cells"],
-             len(result["warnings"])))
+    detail = "%d/%d cells filled" % (counts["filled"], counts["cells"])
+    if counts["empty"]:
+        detail += ", %d empty (legal: the station runs autonomously)" % counts["empty"]
+    print("result    ok (%d personas, %d shows, %s), %d warning(s)"
+          % (counts["personas"], counts["shows"], detail, len(result["warnings"])))
     return EXIT_OK
 
 
@@ -2144,10 +2169,19 @@ def cmd_character(config, args):
         return EXIT_OK
 
     if action == "add-to-grid":
+        clearing = bool(getattr(args, "clear", False))
         slug = args.slug
-        if slug not in _slugs(root, "shows"):
-            raise ToolError("no show %r in instance/character/shows; known: %s"
-                            % (slug, ", ".join(_slugs(root, "shows")) or "none"))
+        if clearing:
+            if slug:
+                raise ToolError("--clear empties the hours; it takes no show slug")
+            target = None
+        else:
+            if not slug:
+                raise ToolError("add-to-grid needs a show slug, or --clear to empty the hours")
+            if slug not in _slugs(root, "shows"):
+                raise ToolError("no show %r in instance/character/shows; known: %s"
+                                % (slug, ", ".join(_slugs(root, "shows")) or "none"))
+            target = slug
         days = []
         for token in args.days.split(","):
             name = token.strip().lower()[:3]
@@ -2170,19 +2204,22 @@ def cmd_character(config, args):
             cells = grid.get(str(day)) or []
             for hour in hours:
                 current = cells[hour] if hour < len(cells) else None
-                if current == slug:
+                if current == target:
                     continue
                 changes.append((day, hour, current))
-                if current:
+                # Emptying a cell never conflicts; filling one over a show does.
+                if current and not clearing:
                     conflicts.append((day, hour, current))
 
         day_label = {v: k for k, v in DAY_NAMES.items()}
         if not changes:
-            print("grid      no change: %s already owns those cells" % slug)
+            print("grid      no change: those hours are already %s"
+                  % ("empty" if clearing else "owned by %s" % target))
             return EXIT_OK
         for day, hour, current in changes:
             print("cell      %s %02d:00  %s -> %s"
-                  % (day_label[day], hour, current or "(empty)", slug))
+                  % (day_label[day], hour, current or "(empty)",
+                     "(empty)" if clearing else target))
         if conflicts and not args.replace:
             sys.stdout.flush()  # show the cells before the refusal on stderr
             raise ToolError("%d cell(s) already hold another show (%s). Re-run with --replace to "
@@ -2193,11 +2230,12 @@ def cmd_character(config, args):
             cells = grid.setdefault(str(day), [None] * 24)
             while len(cells) < 24:
                 cells.append(None)
-            cells[hour] = slug
+            cells[hour] = target
         schedule_doc["schedule"] = grid
         write_json(path, schedule_doc)
-        print("grid      %d cell(s) changed across %s" % (len(changes), ", ".join(
-            sorted({day_label[d] for d, _, _ in changes}))))
+        print("grid      %d cell(s) %s across %s"
+              % (len(changes), "emptied" if clearing else "changed",
+                 ", ".join(sorted({day_label[d] for d, _, _ in changes}))))
         return EXIT_OK
 
     if action in ("edit-persona", "edit-show"):
@@ -2447,11 +2485,14 @@ def build_parser():
     char_show.set_defaults(func=cmd_character)
 
     char_grid = char_sub.add_parser("add-to-grid", help="fill grid cells with a show")
-    char_grid.add_argument("slug")
+    char_grid.add_argument("slug", nargs="?")
     char_grid.add_argument("--days", required=True, help="comma separated: mon,tue")
     char_grid.add_argument("--from", dest="from_hour", type=int, required=True, help="first hour, 0-24")
     char_grid.add_argument("--to", dest="to_hour", type=int, required=True, help="hour after the last")
-    char_grid.add_argument("--replace", action="store_true", help="take over cells that hold another show")
+    char_grid.add_argument("--replace", action="store_true",
+                           help="take over cells that hold another show")
+    char_grid.add_argument("--clear", action="store_true",
+                           help="empty those hours instead: the station runs autonomously then")
     char_grid.set_defaults(func=cmd_character)
 
     char_edit_persona = char_sub.add_parser(

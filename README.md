@@ -54,7 +54,8 @@ other way round, say so.
 **"Back up the station"**
 Copies the settings, the shows, the schedule, the station's skills and its media manifests, and writes a
 note saying where each file goes back. Deliberately more than the console's export, which leaves out the
-schedule — and so loses every show and the whole grid.
+schedule — and so loses every show and the whole grid. It needs host access: without it the tool refuses
+rather than hand you a backup that could not restore the programming.
 
 **"Put the station back to what's in git"**
 Sends your files to the station. It shows you every change first and sends nothing until you confirm.
@@ -142,10 +143,11 @@ walk the whole flow — edit, validate, dry run — without one.
 
 ### One choice decides how much you get
 
-**With only the web address** you can author a station from scratch and push it. You cannot take over the one
-you already have: the API trims host and show details, and it cannot hand back your shows or the weekly grid
-at all. A web-address-only copy of a live station is marked lossy, and `apply` refuses it rather than push
-back seven fields per show and lose the other nineteen.
+**With only the web address** you can author a station from scratch and push it — with `apply --yes
+--no-backup`, because a backup is the one thing that tier cannot take. You cannot take over the one you
+already have: the API trims host and show details, and it cannot hand back your shows or the weekly grid at
+all. A web-address-only copy of a live station is marked lossy, and `apply` refuses it rather than push back
+seven fields per show and lose the other nineteen.
 
 **Add ssh access** and you get the whole station: full reads, a capture you can edit, and a backup that can
 restore the programming.
@@ -156,10 +158,10 @@ finds the controller container and its data directory on the host and prints the
 
 ## Safety, short
 
-Nothing is written to your station until you say so, and a backup is taken first. Every write is read back
-afterwards, so a change that did not land is reported rather than assumed. Deletions refuse when something
-still depends on what you are deleting. The full list of guards, and what each protects against, is in
-`AGENTS.md`.
+Nothing is written to your station until you say so, and a backup is taken first (at tier 1 there is no
+backup to take, and `apply` refuses unless you pass `--no-backup`). Every write is read back afterwards, so
+a change that did not land is reported rather than assumed. Deletions refuse when something still depends
+on what you are deleting. The full list of guards, and what each protects against, is in `AGENTS.md`.
 
 ## Appendix: the technical reference
 
@@ -168,13 +170,14 @@ Two ways to reach a station. The second is worth having.
 |  | Web address only | Plus ssh access |
 | --- | --- | --- |
 | Needs | address + admin password | also ssh and `docker exec` |
+| Create / update | author from scratch only, with `--no-backup` | yes |
 | Read hosts and shows | trimmed | complete |
 | Read the weekly grid | yes | yes |
-| Backup | **without the schedule** | complete |
+| Backup | **refused** | complete |
 
 | Command | What it does | Example |
 | --- | --- | --- |
-| `status` | tier, station, what is on air, drift vs your files, and the lines that reach host access | `status` |
+| `status` | tier, station, what is on air, drift vs your files (tier 2 only), and the lines that reach host access | `status` |
 | `pull` | copy the station into `instance/` | `pull --force` |
 | `diff` | what differs between your files and the station | `diff` |
 | `validate` | check your files before applying | `validate --dir examples/demo` |
@@ -188,8 +191,16 @@ Two ways to reach a station. The second is worth having.
 
 Flags live here rather than in the body: `apply` also takes `--force-now` (write while on air), `--no-backup`,
 `--backup-dir`, and `--prune` / `--force-prune` for things on the station but not in your files. `pull` takes
-`--allow-lossy` for a partial copy. Every `onair` verb that changes air needs `--yes`; `skip` needs
-`--expect-id` or `--any-track`.
+`--allow-lossy` for a partial copy. `backup --dir` writes the copy somewhere other than `~/.subwave-backups`,
+and `restore --force-now` restores while the station is on air. `character init` takes `--from demo|blank` — a
+placeholder station instead of the demo — and `--force` to replace an existing `instance/`. `skills edit`
+changes `--label`, `--cooldown` and `--brief`, and `blocklist rule add|edit` authors a rule by slug.
+
+The `onair` reads are free: `onair tools`, `onair now`, `onair state`, and `onair list skills|sfx|jingles`.
+Every `onair` verb that changes air needs `--yes`: `say` (with `--raw` to say it verbatim, `--over-track` to
+talk over the music, and `--sfx` to play an effect first), `segment`, `skip`, `request`, `queue` (with `--pick N`
+to take a result other than the top one), `sfx` and `jingle`. `skip` additionally needs `--expect-id` or
+`--any-track`.
 
 Two directories are called `skills/`, and they are different things:
 

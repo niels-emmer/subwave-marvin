@@ -96,7 +96,7 @@ For the full picture — hours owned, souls, `houseRules`, exposure — use the 
 | "Too dry", "curt", "clipped" | `warmth` | Integer; higher is warmer. This is tone, not volume — it will not make a host talk less. |
 | "Too many local references" | `localColour` | Integer; lower means fewer asides and details. |
 | "Sounds like an announcer" / "too formal" | `linkStyle` | `natural` (conversational hand-off) or `announce` (presenter announcement). |
-| "Never speaks" | `djMode`, then `frequency` | `djMode: false` is a silent host; `frequency: silent` is the same outcome on the ladder. |
+| "Never speaks" | `frequency` | The silence dial is `frequency: silent`. It is not `djMode`, which only gates back-announce and transition talk and leaves the DJ speaking on the ladder. |
 | "Two voices, twice the talk" | `banter` on the **show** | With `guestPersonaIds`; usually the real answer when it is on. |
 | "The music keeps stopping" | `pauseTalk` on the **show** | Same words feel much longer when the record ducks out for them. |
 | "A whole segment I did not ask for" | `programme`, `segmentSkill` on the **show** | Structured mode adds talk beyond the between-track links. |

@@ -22,14 +22,15 @@ runs live, so a config change alters the next track and the next talk segment, n
 | Create / update | only from a complete capture | yes |
 | Read personas, shows | **trimmed** | full |
 | Read the grid | yes | yes |
-| Backup | **no schedule** | complete |
+| Backup | **refused** — could not restore the programming | complete |
 
 Every operation says which tier it is running at. Tier 1 is portable and lossy; do not pretend
 otherwise.
 
 A tier-1 `pull` is **always** lossy — the API cannot return the 14 persona or 19 show fields it hides —
 so `validate` fails and `apply` refuses. Host access is therefore needed **once**, to take a complete
-capture; after that, writing from that capture works at either tier.
+capture; after that, writing from that capture works at either tier (tier 1 still needs `--no-backup`,
+and `--prune` needs host access).
 
 **Tier 1 cannot read full show definitions.** `/api/schedule` returns shows cut to 7 of 26 fields and
 there is no `GET /shows`. So `apply` must only ever send whole objects built from the repo — never
@@ -69,7 +70,7 @@ Real write routes, absent from the OpenAPI export:
 | Route | Semantics |
 | --- | --- |
 | `POST /api/settings` | admin, **shallow partial merge**. Send whole top-level sections: `{"personas":[…]}` replaces the array, and a partial persona loses fields. |
-| `POST /api/shows` | admin, `{"show":{…}}`, **upsert by `show.id`**; no id creates a show (409 at the show cap). |
+| `POST /api/shows` | admin, `{"show":{…}}`, **upsert by `show.id`**; no id creates a show. A station-side show cap answers 409, which the tool reports rather than works around. |
 | `PUT /api/schedule` | admin, **replaces the whole grid** — always send all 7×24 cells. |
 | `POST` / `DELETE /api/schedule/override` | admin, one-off programme override. |
 | `POST /api/personas/import`, `GET /api/personas/:id/export`, `*/personas/:id/avatar`, `DELETE /api/personas/:id`, `DELETE /api/shows/:id` | admin; the deletes are destructive. |
@@ -108,8 +109,8 @@ every show and the whole grid do not. So `backup` copies the config **and** thos
   blocks live values from entering a commit.
 - **Blocklist rule identity is a slug the toolkit owns, mapped to a station uuid in
   `instance/blocklist.lock.json`.** The station mints the uuid; without the lock every apply would POST a
-  new one for the same rule, filling RULES_MAX=50 with near-duplicates while `matchCount` still looked
-  plausible. Never POST a rule that already has a uuid, and never send the slug to the station.
+  new one for the same rule, filling `BLOCKLIST_RULES_MAX` (50) with near-duplicates while `matchCount`
+  still looked plausible. Never POST a rule that already has a uuid, and never send the slug to the station.
 - **On-air control is ephemeral, and separate from everything else.** `onair` talks to the station's MCP
   server at `/api/mcp` to change what is happening NOW — say, skip, queue, request, sfx, jingle. It is the
   one imperative surface: it never appears in `pull`, `diff`, `validate`, `apply` or `--prune`, nothing it

@@ -106,7 +106,7 @@ session: author the station's character, read what is actually live, and push re
 ### Documentation
 
 - [`AGENTS.md`](AGENTS.md) — the operating contract for an agent working the repo.
-- [`docs/PLAN.md`](docs/PLAN.md) — design and phases; [`docs/decision-log.md`](docs/decision-log.md)
+- [`docs/PLAN.md`](docs/PLAN.md) — what is left to do; [`docs/decision-log.md`](docs/decision-log.md)
   — why each choice was made; [`docs/applied.md`](docs/applied.md) — the on-air audit trail.
 - [`docs/public-readiness.md`](docs/public-readiness.md) — the checklist for publishing this repo.
 

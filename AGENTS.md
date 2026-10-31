@@ -42,13 +42,16 @@ Full fidelity lives in the state dir on the host, as two JSON documents:
 They are usually root-owned, so plain ssh/scp fails. Read them through the controller container:
 
 ```sh
-ssh "$SUBWAVE_HOST" 'docker exec sub-wave-controller cat "$SUBWAVE_STATE_DIR/settings.json"'
-ssh "$SUBWAVE_HOST" 'docker exec sub-wave-controller cat "$SUBWAVE_STATE_DIR/schedule.json"'
+ssh "$SUBWAVE_HOST" "docker exec sub-wave-controller cat '$SUBWAVE_STATE_DIR/settings.json'"
+ssh "$SUBWAVE_HOST" "docker exec sub-wave-controller cat '$SUBWAVE_STATE_DIR/schedule.json'"
 ```
 
-The container name is install-specific; the image default is `sub-wave-controller`. Runtime and derived
-files in the same dir (`library.db*`, `secrets.env`, `icecast*`, `liquidsoap_*.txt`, archives, logs) are
-never copied and never hand-edited.
+`SUBWAVE_STATE_DIR` is the path **inside the controller container** — the bind mount, usually
+`/var/sub-wave` — not the host path. Single-quoting the outer ssh argument would leave it to the remote
+shell, which does not have the variable, and the path collapses to `/settings.json`. The container name is
+install-specific too; the image default is `sub-wave-controller`. Runtime and derived files in the same dir
+(`library.db*`, `secrets.env`, `icecast*`, `liquidsoap_*.txt`, archives, logs) are never copied and never
+hand-edited.
 
 ## The documented API is not the config API
 
@@ -117,8 +120,9 @@ scripts/subwave.py backup            # refuses at tier 1; includes the schedule 
 
 ## Layout
 
-`instance/` is this deployment and is gitignored: `settings.json` plus a `character/` layer
-(`character.json` for identity and house rules, `personas/*.json`, `shows/*.json`, `schedule.json`).
-`examples/demo/` is a committed fictional station in the same shape, so the repo is testable with no
-live station. `docs/PLAN.md` holds the design and phases, `docs/decision-log.md` the decisions, and
-`docs/applied.md` the on-air audit trail.
+`instance/` is this deployment and is gitignored. Today it holds only `settings.json` and `schedule.json`,
+captured verbatim from the host. The `character/` layer — `character.json` for identity and house rules,
+`personas/*.json`, `shows/*.json`, and a per-slug `schedule.json` — **does not exist yet**; it arrives with
+the tool in P2, so do not go looking for those files. `examples/demo/` is a committed fictional station
+already in that target shape, so the repo is testable with no live station. `docs/PLAN.md` holds the design
+and phases, `docs/decision-log.md` the decisions, and `docs/applied.md` the on-air audit trail.

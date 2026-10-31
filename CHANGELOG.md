@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Tier 2 is reachable from a bare ssh host.** `status` at tier 1 now probes the host it is given: one
+  read-only ssh round trip lists the running containers, inspects their mounts, and reports the first
+  mount that already contains a `settings.json`, printing the exact `SUBWAVE_CONTAINER=` and
+  `SUBWAVE_STATE_DIR=` lines to add. A wrong container name on the right host is recovered the same way.
+  Without `SUBWAVE_HOST` it says what to set and probes nothing. See
+  [`docs/decision-log.md`](docs/decision-log.md) D13.
+- [`tests/test_onboarding.py`](tests/test_onboarding.py) pins the discovery contract — parsing, ordering
+  (the image default leads), remote-shell noise, an unreachable host, and every `status` message — with
+  `ssh_run` stubbed, so it needs no ssh.
+- `AGENTS.md` gains a **Which procedure to load** table. No agent scans a repo-root `skills/` automatically
+  (Claude Code reads `.claude/skills/`, OpenCode `.opencode/skills/`, Codex has none), so the table is the
+  discovery surface rather than an unread directory.
+- The README names the station's own MCP endpoint as the **no-checkout door**: `/api/mcp`, 21 tools, reads
+  plus on-air control — and states plainly that it has no diff, no dry run, no backup and no undo, and
+  cannot touch configuration.
+
+### Changed
+
+- The README's "Getting started" starts at `git clone`. It did not before: it opened with `python3` and
+  `.env`, so a stranger's first step was missing, and `tests/test_smoke.py` could not catch it because the
+  smoke test begins *after* the clone.
+- The tier-1 honest note is now a decision rather than a caveat. Web address only = author from scratch;
+  a lossy capture of a live station is refused by `apply` and the README says so.
+- `status` no longer claims "this build is read-only" — `apply` and `onair` have both been able to write for
+  some time, so the line was false.
+- `character init` records an **authored** capture (`tier: null`, `source: "authored"`) instead of
+  hardcoding `tier: 2` for files that were never read from a station. `examples/demo/ids.lock.json` matches.
+
 ### Fixed
 
 - `.env.example` documents `SUBWAVE_CONTAINER`, which the config loader has read and every tier-2

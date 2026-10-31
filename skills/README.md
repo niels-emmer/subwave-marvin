@@ -6,10 +6,14 @@ A skill here is one directory, `skills/<name>/SKILL.md`: a YAML header with a `n
 should trigger it. The body is procedure, not doctrine: `AGENTS.md` is the authority on tiers, the
 config API and safety, and every skill links back to it rather than restating it.
 
-These are agent-agnostic. Claude Code, Codex and OpenCode all discover them the same way: read the
-descriptions, match the user's sentence, load the body. Nothing here names a station, host, persona
-or show — the operator's own data stays in gitignored `instance/`, referred to as `<slug>` and
-`<persona>`.
+These are agent-agnostic in format and in content: a YAML header with a `description` is the shape every
+agent matches on, and nothing here names a station, host, persona or show — the operator's own data stays
+in gitignored `instance/`, referred to as `<slug>` and `<persona>`.
+
+**The path is not one any agent scans automatically.** Claude Code reads `.claude/skills/`, OpenCode reads
+`.opencode/skills/`, and Codex has no skills directory at all. So discovery runs through `AGENTS.md`: its
+"Which procedure to load" table is the trigger surface, and it points here. Add a skill there, or it is
+findable only by an agent that happens to list this directory.
 
 ## The five
 

@@ -99,6 +99,8 @@ so the repo is testable with no live station and no instance data.
 
 ```
 scripts/subwave.py status            # tier, station, on-air state, what this tier can and cannot do
+                                     # at tier 1: probes the host it is given and prints the two
+                                     # .env lines that reach tier 2 (D13)
 scripts/subwave.py pull [--check]    # live -> instance/ (secrets redacted)
 scripts/subwave.py diff              # read-only drift report
 scripts/subwave.py apply [--dry-run] # repo -> live, whole objects only

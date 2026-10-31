@@ -70,6 +70,18 @@ These change what is happening this second. They are the only things here that d
 go-ahead each time, and a skip also needs to know which track you meant — or your permission to skip
 whatever is playing.
 
+## Without a checkout: the station's own MCP server
+
+If you only want to talk to the station — what is on air, say something, skip a track, queue a request —
+you do not need this repository at all. The station serves an MCP endpoint at `/api/mcp` (Streamable HTTP,
+21 tools), so any MCP-capable agent can be pointed at it as a server. Reads need no credentials; the
+control tools take the station's admin username and password.
+
+What that door does not have is every safety property below it in this README: no diff, no dry run, no
+backup before a change, no read-back afterwards, no `--yes`. Each call happens immediately and cannot be
+undone. And it cannot read or write the station's configuration at all — no persona, show, schedule or
+settings tool exists there. That is what the checkout, and `apply`, are for.
+
 ## What it cannot do yet
 
 - **Avatars and station imaging.** Jingles, sound effects and beds are backed up but not authored here. Use
@@ -115,16 +127,32 @@ That second path is the only one that skips the review, and it never touches you
 
 ## Getting started
 
-You need `python3` (nothing to install), your station, and its admin username and password. Copy
-`.env.example` to `.env` and fill it in, then ask your agent for the station's status.
+```sh
+git clone https://github.com/niels-emmer/subwave-marvin.git
+cd subwave-marvin
+cp .env.example .env        # the station's address and its admin password
+```
+
+Then open your agent in that directory — Claude Code, Codex, OpenCode, or anything else that reads
+`AGENTS.md` — and ask for the station's status. Nothing to install: the tool is one Python file with no
+dependencies.
 
 No station yet? `character init --from demo` writes a small fictional station into `instance/`, so you can
 walk the whole flow — edit, validate, dry run — without one.
 
-One honest note. With only the station's web address you get a partial picture: the API trims host and show
-details, and a backup cannot include your shows or the weekly grid. If your agent can also reach the machine
-the station runs on, tell it the ssh host and the data directory — then you get the whole thing, including a
-backup that can restore the programming. Worth doing before you change anything.
+### One choice decides how much you get
+
+**With only the web address** you can author a station from scratch and push it. You cannot take over the one
+you already have: the API trims host and show details, and it cannot hand back your shows or the weekly grid
+at all. A web-address-only copy of a live station is marked lossy, and `apply` refuses it rather than push
+back seven fields per show and lose the other nineteen.
+
+**Add ssh access** and you get the whole station: full reads, a capture you can edit, and a backup that can
+restore the programming.
+
+You do not have to work out the rest yourself. Set `SUBWAVE_HOST` to your ssh address and run status: it
+finds the controller container and its data directory on the host and prints the two lines to add to
+`.env`.
 
 ## Safety, short
 
@@ -146,7 +174,7 @@ Two ways to reach a station. The second is worth having.
 
 | Command | What it does | Example |
 | --- | --- | --- |
-| `status` | tier, station, what is on air, whether your files match | `status` |
+| `status` | tier, station, what is on air, drift vs your files, and the lines that reach host access | `status` |
 | `pull` | copy the station into `instance/` | `pull --force` |
 | `diff` | what differs between your files and the station | `diff` |
 | `validate` | check your files before applying | `validate --dir examples/demo` |

@@ -85,6 +85,12 @@ from creating a duplicate.
 persona, show, schedule or settings tool exists. Config goes through the admin HTTP API. Do not
 re-litigate this from the published manual, which contradicts itself; `tools/list` is the truth.
 
+A checkout is not the only way in, and say so when it fits the task. That endpoint is a Streamable HTTP MCP
+server, so an agent can be pointed straight at it with no clone: reads need no credentials, control takes
+the admin Basic pair. It is the right answer for "what's on air" and "skip this track". It carries **none**
+of the guarantees this repo exists for — no diff, no dry run, no backup, no read-back, no `--yes`, no undo —
+so never present it as a way to change configuration.
+
 ## A backup does not contain the schedule
 
 `GET /api/backup/export` is a ~95 MB zip holding `settings.json`, `library.db`, skills, sfx, jingles,
@@ -178,6 +184,25 @@ python3 scripts/subwave.py character new-persona|new-show|add-to-grid   # author
 python3 scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE  # change named fields only
 python3 scripts/subwave.py apply     # DRY RUN by default; --yes performs the writes
 ```
+
+## Which procedure to load
+
+`skills/<name>/SKILL.md` holds the rehearsed procedures. No agent scans that directory automatically —
+Claude Code reads `.claude/skills/`, OpenCode reads `.opencode/skills/`, Codex has no skills directory — so
+this table is the discovery surface. Match the verb, load the body.
+
+| Skill | Answers | Say something like |
+| --- | --- | --- |
+| `add-host` | create a persona from a character brief and put it on air | "add a host", "new DJ", "new persona", "hire someone" |
+| `new-show` | create a programme and put it on the grid | "new show", "schedule a programme", "give <persona> a Sunday slot" |
+| `explain-host` | diagnose why a persona talks the way it does | "why does <persona> talk so much", "too chatty", "make the DJ say less" |
+| `tune-host` | change a persona's dials, or one show's talk settings | "make <persona> warmer", "tune the host", "change the dials" |
+| `backup` | take a config backup that can actually be restored | "backup", "back up the station", "save the config" |
+
+Two rules. **The verb decides** when two seem to fit: "why does the new show's host talk so much" is
+diagnosis (`explain-host`) until the user asks to change something. **If none fit, do not improvise a
+procedure** — read this file, run `status`, and ask. Whichever skill loads, announce the tier and whether
+the station is on air before doing anything else.
 
 ## Layout
 

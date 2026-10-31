@@ -83,6 +83,21 @@ class InitTests(CharacterTestCase):
         self.assertEqual(code, 0, output)
         self.assert_valid()
 
+    def test_init_records_an_authored_capture_not_a_tier(self):
+        # Nothing was read from a station, so the lockfile must not claim a
+        # tier. `lossy` is the only field that gates a write, and it is false.
+        self.run_cli("character", "init")
+        lock = json.loads((self.root() / "ids.lock.json").read_text())
+        self.assertIsNone(lock["capture"]["tier"])
+        self.assertFalse(lock["capture"]["lossy"])
+        self.assertEqual(lock["capture"]["source"], "authored")
+
+    def test_demo_init_is_not_a_tier_2_capture_either(self):
+        self.run_cli("character", "init", "--from", "demo")
+        lock = json.loads((self.root() / "ids.lock.json").read_text())
+        self.assertIsNone(lock["capture"]["tier"])
+        self.assertFalse(lock["capture"]["lossy"])
+
     def test_init_refuses_to_overwrite(self):
         self.run_cli("character", "init")
         code, output = self.run_cli("character", "init")

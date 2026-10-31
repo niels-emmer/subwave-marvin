@@ -16,9 +16,10 @@
   },
   "activePersonaId": "p_demo_nell",
   "capture": {
-    "tier": 2,
+    "tier": null,
     "at": "2026-10-31T00:00:00Z",
     "lossy": false,
-    "lost": []
+    "lost": [],
+    "source": "authored"
   }
 }

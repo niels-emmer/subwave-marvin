@@ -219,14 +219,12 @@ not its subject. Station-specific choices — including which persona hosts whic
 
 ## 12. Open questions
 
-1. **Container name.** Tier 2 assumes `docker exec sub-wave-controller`. That is the image default, not a
-   guarantee. Add `SUBWAVE_CONTAINER` to `.env.example`, or document the assumption?
-2. **Tier-1 apply and the grid.** `PUT /api/schedule` needs all 168 cells, and tier 1 can read the grid —
+1. **Tier-1 apply and the grid.** `PUT /api/schedule` needs all 168 cells, and tier 1 can read the grid —
    but should tier 1 refuse schedule writes anyway, since it cannot verify the shows it points at?
-3. **Playlist anchoring.** Shows can reference Navidrome playlist ids, and nothing in the repo knows how
+2. **Playlist anchoring.** Shows can reference Navidrome playlist ids, and nothing in the repo knows how
    to learn them. Navidrome API with the station's own credentials, or a manual list?
-4. **Deploy artifacts.** Does the toolkit ship a compose file for new installs, or point at upstream?
-5. **Character portability.** Should `examples/demo` double as a starting template users copy into
+3. **Deploy artifacts.** Does the toolkit ship a compose file for new installs, or point at upstream?
+4. **Character portability.** Should `examples/demo` double as a starting template users copy into
    `instance/`, or stay purely illustrative?
 6. **Skill surface.** Which tasks get a skill first: new show, diagnose a host, backup, schedule review?
 

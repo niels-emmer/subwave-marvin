@@ -6,7 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- [`docs/public-readiness.md`](docs/public-readiness.md) is now a record of the completed launch
+  rather than a pre-flight checklist: the state at publication, the settings to re-verify, and the
+  lesson that a public repository exposes **every branch**, so the leak sweep has to cover remote
+  refs and not just `main`.
 
 ## [1.0.0] — 2026-10-31
 

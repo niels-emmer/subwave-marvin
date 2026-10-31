@@ -88,6 +88,10 @@ and you have a different station on the same software.
 The split is a repo convenience: the server keeps personas inside `settings.json` and shows inside
 `schedule.json`. `pull` splits them out; `apply` reassembles them.
 
+The identity fields are the exception: they are **removed** from `instance/settings.json` and live only
+in `character.json`. Keeping both copies is what made editing the character layer a silent no-op —
+`apply` sent the stale one. `houseRules` is a list here and one newline-joined string on the station.
+
 `examples/demo/` is a committed fictional station in exactly this shape (invented hosts, placeholder ids),
 so the repo is testable with no live station and no instance data.
 

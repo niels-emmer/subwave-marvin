@@ -339,10 +339,17 @@ def redact(settings):
 # the model: live documents <-> the instance/ character layer
 # --------------------------------------------------------------------------
 
+# The six identity fields live in character.json and NOWHERE else. They used to
+# be written into instance/settings.json as well, and because apply sent
+# settings.json wholesale while character.json was only read, editing the
+# character layer was a silent no-op: the stale copy won.
+IDENTITY_KEYS = ("station", "stationDescription", "locale", "timezone", "theme", "djHouseRules")
+
+
 def strip_settings(settings):
-    """What belongs in instance/settings.json: no personas, no shows."""
+    """What belongs in instance/settings.json: no personas, no shows, no identity."""
     return {k: v for k, v in settings.items()
-            if k not in ("personas", "activePersonaId", "shows")}
+            if k not in ("personas", "activePersonaId", "shows") and k not in IDENTITY_KEYS}
 
 
 def character_from(settings):
@@ -352,8 +359,12 @@ def character_from(settings):
     character = {name: copy.deepcopy(settings.get(source)) for name, source in CHARACTER_FIELDS}
     rules = character.get("houseRules")
     if isinstance(rules, str):
-        character["houseRules"] = [rules.strip()] if rules.strip() else []
-    elif not isinstance(rules, list):
+        # The station stores djHouseRules as one newline-joined string. Pulling
+        # it as a single element turned six rules into one blob.
+        character["houseRules"] = [line.strip() for line in rules.split("\n") if line.strip()]
+    elif isinstance(rules, list):
+        character["houseRules"] = [str(rule).strip() for rule in rules if str(rule).strip()]
+    else:
         character["houseRules"] = []
     return character
 
@@ -1112,6 +1123,128 @@ def rehydrate(body, live_settings, config):
     return remaining
 
 
+def rules_to_string(rules):
+    """The character layer holds one rule per list item; the station holds one
+    newline-joined string. Join here so a 3-rule list round-trips losslessly."""
+    if isinstance(rules, str):
+        return rules
+    return "\n".join(str(rule).strip() for rule in (rules or []) if str(rule).strip())
+
+
+def normalise_festivals(festivals):
+    """Mirror the station's own transform (schemas/settings.ts): every festival
+    is stored with month, day, name, mood, description and windowDays. Sending
+    the short form made the station add defaults, so the payload churned on every
+    apply and diff-after-apply was never clean."""
+    if not isinstance(festivals, list):
+        return festivals
+    normalised = []
+    for entry in festivals:
+        if not isinstance(entry, dict):
+            normalised.append(entry)
+            continue
+        normalised.append({
+            "month": int(entry.get("month", 1)),
+            "day": int(entry.get("day", 1)),
+            "name": str(entry.get("name") or "").strip(),
+            "mood": str(entry.get("mood") or "").strip(),
+            "description": str(entry.get("description") or "").strip(),
+            "windowDays": int(entry.get("windowDays") or 0),
+        })
+    return normalised
+
+
+def settings_payload(model):
+    """The settings section as it must be SENT.
+
+    settings.json no longer carries the identity fields - character.json is their
+    only home - so they are merged back here. Without this, apply wrote the stale
+    copy and editing the character layer did nothing.
+    """
+    payload = copy.deepcopy(model.get("settings") or {})
+    character = model.get("character") or {}
+    for field, target in CHARACTER_FIELDS:
+        if field not in character:
+            continue
+        value = character[field]
+        if target == "djHouseRules":
+            value = rules_to_string(value)
+        elif target == "theme" and isinstance(value, str):
+            value = {"active": value}
+        payload[target] = value
+    payload["festivals"] = normalise_festivals(payload.get("festivals"))
+    return payload
+
+
+def _diff_values(expected, actual, path=""):
+    """Paths where the station does not hold what we sent."""
+    problems = []
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        for key in expected:
+            if key not in actual:
+                problems.append("%s%s (missing on the station)" % (path, key))
+            else:
+                problems += _diff_values(expected[key], actual[key], "%s%s." % (path, key))
+    elif isinstance(expected, list) and isinstance(actual, list):
+        if len(expected) != len(actual):
+            problems.append("%s (sent %d item(s), station has %d)"
+                            % (path.rstrip(".") or "list", len(expected), len(actual)))
+        else:
+            for index, (left, right) in enumerate(zip(expected, actual)):
+                problems += _diff_values(left, right, "%s[%d]." % (path, index))
+    elif expected != actual:
+        problems.append("%s (sent %r, station has %r)"
+                        % (path.rstrip(".") or "value", expected, actual))
+    return problems
+
+
+def verify_written(config, tier, steps, grid_body):
+    """Re-read the station and prove every field we sent actually landed.
+
+    A silent no-op is the worst failure this tool has, so this fails loudly and
+    names the field rather than warning.
+    """
+    problems = []
+    if tier == 2:
+        settings_now = json.loads(read_state_file(config, "settings.json"))
+        schedule_now = json.loads(read_state_file(config, "schedule.json"))
+        for step in steps:
+            if step["entity"] == "settings":
+                for key, sent in step["body"].items():
+                    problems += _diff_values(sent, settings_now.get(key), "%s." % key)
+            elif step["entity"] == "show":
+                sent = step["body"]["show"]
+                found = next((show for show in (schedule_now.get("shows") or [])
+                              if sent.get("id") and show.get("id") == sent.get("id")), None)
+                if found is None:
+                    problems.append("shows: %r is not on the station" % sent.get("name"))
+                else:
+                    problems += _diff_values(sent, found, "show %r: " % sent.get("name"))
+        problems += _diff_values(grid_body.get("schedule"),
+                                 (schedule_now.get("schedule") or {}), "schedule.")
+    else:
+        status, schedule_now = http_json(config, "/api/schedule")
+        if status != 200:
+            problems.append("could not read the station back (HTTP %s)" % status)
+        else:
+            problems += _diff_values(grid_body.get("schedule"),
+                                     (schedule_now.get("schedule") or {}), "schedule.")
+            for step in steps:
+                if step["entity"] != "show":
+                    continue
+                sent = step["body"]["show"]
+                found = next((show for show in (schedule_now.get("shows") or [])
+                              if show.get("id") == sent.get("id")), None)
+                if found is None:
+                    problems.append("shows: %r is not on the station" % sent.get("name"))
+                    continue
+                for key, value in found.items():
+                    if key in sent and sent[key] != value:
+                        problems.append("show %r: %s (sent %r, station has %r)"
+                                        % (sent.get("name"), key, sent[key], value))
+    return problems
+
+
 def build_steps(model, lock):
     """Whole objects from the repo. Personas and settings first, shows second."""
     steps = []
@@ -1125,10 +1258,10 @@ def build_steps(model, lock):
         steps.append({"method": "POST", "path": "/api/settings", "entity": "settings",
                       "label": "personas + activePersonaId", "body": body,
                       "note": "%d personas: %s" % (len(personas), names)})
-    settings = model.get("settings") or {}
+    settings = settings_payload(model)
     if settings:
         steps.append({"method": "POST", "path": "/api/settings", "entity": "settings",
-                      "label": "settings sections", "body": copy.deepcopy(settings),
+                      "label": "settings + character", "body": settings,
                       "note": "%d top-level keys" % len(settings)})
     for slug, show in sorted((model.get("show_files") or {}).items()):
         payload = copy.deepcopy(show)
@@ -1315,6 +1448,16 @@ def cmd_apply(config, args):
     status, _ = send_step(config, {"method": "PUT", "path": "/api/schedule",
                                    "body": grid_body, "label": "grid"})
     print("wrote     PUT %-14s %-28s -> HTTP %s" % ("/api/schedule", "grid", status))
+
+    # Prove it landed. A 200 means "accepted", not "stored what we sent", and a
+    # silent no-op is the worst failure this tool has.
+    problems = verify_written(config, tier, build_steps(model, lock), grid_body)
+    if problems:
+        shown = problems[:10]
+        more = "" if len(problems) <= 10 else " (+%d more)" % (len(problems) - 10)
+        raise ToolError(
+            "the station did not store what was sent, so the change did NOT land:\n  %s%s"
+            % ("\n  ".join(shown), more))
 
     lock["applied"] = {
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

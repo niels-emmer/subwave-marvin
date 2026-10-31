@@ -565,6 +565,54 @@ def drift_count(report):
     return total
 
 
+def _blocklist_key(item, kind):
+    if not isinstance(item, dict):
+        return repr(item)
+    if kind == "rules":
+        return item.get("id") or item.get("label") or "?"
+    return "%s:%s" % (item.get("type"), item.get("id"))
+
+
+def compare_blocklist(repo, live):
+    """Same added/removed/changed shape as personas and shows."""
+    report = {}
+    for kind in ("entries", "rules"):
+        repo_items = {_blocklist_key(item, kind): item for item in (repo.get(kind) or [])}
+        live_items = {_blocklist_key(item, kind): item for item in (live.get(kind) or [])}
+        changed = sorted(key for key in set(repo_items) & set(live_items)
+                         if repo_items[key] != live_items[key])
+        report[kind] = {
+            "added": sorted(set(repo_items) - set(live_items)),
+            "removed": sorted(set(live_items) - set(repo_items)),
+            "changed": changed,
+            "unchanged": sorted((set(repo_items) & set(live_items)) - set(changed)),
+        }
+        if kind == "rules":
+            # A rule's identity is its id; its label is what a human reads.
+            report[kind]["labels"] = {
+                key: (item.get("label") or key)
+                # repo last so its label wins: that is the one being edited
+                for key, item in list(live_items.items()) + list(repo_items.items())
+            }
+    return report
+
+
+def print_blocklist_diff(report):
+    for kind in ("entries", "rules"):
+        part = report[kind]
+        names = part.get("labels") or {}
+        detail = []
+        for label in ("changed", "added", "removed"):
+            if part[label]:
+                detail.append("%s: %s" % (label, ", ".join(names.get(key, key)
+                                                           for key in part[label])))
+        print("%-10s%d unchanged, %d changed, %d added, %d removed%s"
+              % ("blocklist" if kind == "entries" else "",
+                 len(part["unchanged"]), len(part["changed"]),
+                 len(part["added"]), len(part["removed"]),
+                 "  (" + "; ".join(detail) + ")" if detail else ""))
+
+
 def print_diff(report):
     for kind in ("personas", "shows"):
         part = report[kind]
@@ -687,6 +735,199 @@ def _sync_line(config, tier, settings, schedule):
     return "%d change(s) vs instance/ (run: subwave.py diff)" % count
 
 
+# --------------------------------------------------------------------------
+# blocklist: the third config document, and the one the station's own backup
+# silently drops (backup/zip.ts INCLUDE_FILES lists jingles.json, jingles.m3u and
+# sfx.json, not blocklist.json). Ours is meant to be complete, so it carries it.
+# --------------------------------------------------------------------------
+
+BLOCKLIST_FILE = "blocklist.json"
+BLOCKLIST_ENTRY_TYPES = ("track", "album", "artist")
+BLOCKLIST_RULE_FIELDS = ("genre", "tag", "mood", "artist", "album", "title", "playlist")
+BLOCKLIST_RULES_MAX = 50
+BLOCKLIST_LABEL_MAX = 64
+BLOCKLIST_VALUES_MAX = 12
+BLOCKLIST_VALUE_MAX = 64
+
+# Fields the store mints and never accepts back; kept on capture so a rule can be
+# identified later, stripped before any write.
+BLOCKLIST_DERIVED = ("active", "matchCount")
+
+
+def empty_blocklist():
+    return {"entries": [], "rules": []}
+
+
+def _clean_blocklist_item(item, keys):
+    """Keep the stored shape only: the API adds live `active` and `matchCount`."""
+    if not isinstance(item, dict):
+        return item
+    return {key: copy.deepcopy(item[key]) for key in keys if key in item}
+
+
+def _clean_blocklist(payload):
+    """Keep the stored shape: the API adds live `active` and `matchCount`."""
+    payload = payload or {}
+    return {
+        "entries": [_clean_blocklist_item(entry, ("type", "id", "name", "artist", "album",
+                                                  "addedAt"))
+                    for entry in (payload.get("entries") or [])],
+        "rules": [_clean_blocklist_item(rule, ("id", "label", "field", "values", "season",
+                                               "showIds", "addedAt"))
+                  for rule in (payload.get("rules") or [])],
+    }
+
+
+def read_blocklist_from_state(config, state=None):
+    """Tier 2: the file IS the document, minus the fields we drop anyway.
+
+    Reading it here keeps tier 2 free of a second credential. Someone who can
+    read the state files as root should not also need the admin password to pull.
+    """
+    state = state or SshStateSource(config)
+    if BLOCKLIST_FILE not in state.list_files():
+        return empty_blocklist()
+    try:
+        payload = json.loads(state.read_bytes(BLOCKLIST_FILE).decode("utf-8"))
+    except Exception as exc:
+        raise ToolError("cannot read %s from the state dir (%s)" % (BLOCKLIST_FILE, exc))
+    return _clean_blocklist(payload)
+
+
+def fetch_blocklist(config):
+    """Tier 1: GET /api/library/blocklist. Admin HTTP, and complete.
+
+    This is the one entity tier 1 captures losslessly - unlike shows, which the
+    API trims to 7 of 26 fields.
+    """
+    try:
+        status, payload = http_json(config, "/api/library/blocklist", admin=True)
+    except ConfigError as exc:
+        raise ConfigError(
+            "tier 1 reads the blocklist over the admin API, so it needs admin credentials: %s"
+            % exc)
+    if status == 404:
+        return empty_blocklist()
+    if status != 200:
+        raise ToolError("GET /api/library/blocklist returned HTTP %s" % status)
+    return _clean_blocklist(payload)
+
+
+def blocklist_to_repo(document, lock):
+    """Server show ids -> repo show slugs, so the document reads like the rest."""
+    id_to_slug = {id_: slug for slug, id_ in (lock.get("shows") or {}).items()}
+    result = copy.deepcopy(document)
+    for rule in result.get("rules") or []:
+        rule["showIds"] = [id_to_slug.get(id_, id_) for id_ in (rule.get("showIds") or [])]
+    return result
+
+
+def blocklist_to_live(document, lock):
+    """Repo show slugs -> server show ids. Used by 3b; harmless here."""
+    slug_to_id = lock.get("shows") or {}
+    result = copy.deepcopy(document)
+    for rule in result.get("rules") or []:
+        rule["showIds"] = [slug_to_id.get(slug, slug) for slug in (rule.get("showIds") or [])]
+    return result
+
+
+def load_repo_blocklist(root=None):
+    """instance/blocklist.json, or an empty document when the station has none."""
+    path = Path(root or INSTANCE_DIR) / BLOCKLIST_FILE
+    if not path.is_file():
+        return empty_blocklist()
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ToolError("%s is not valid JSON (%s)" % (path, exc))
+    if not isinstance(document, dict):
+        raise ToolError("%s must be a JSON object" % path)
+    document.setdefault("entries", [])
+    document.setdefault("rules", [])
+    return document
+
+
+def validate_blocklist(document, show_slugs, errors, warnings):
+    """Field enum, length limits, season ranges, and show references."""
+    entries = document.get("entries")
+    rules = document.get("rules")
+    if not isinstance(entries, list):
+        errors.append("blocklist.json: 'entries' must be a list")
+        entries = []
+    if not isinstance(rules, list):
+        errors.append("blocklist.json: 'rules' must be a list")
+        rules = []
+
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            errors.append("blocklist.json: entries[%d] must be an object" % index)
+            continue
+        if entry.get("type") not in BLOCKLIST_ENTRY_TYPES:
+            errors.append("blocklist.json: entries[%d].type %r must be one of: %s"
+                          % (index, entry.get("type"), ", ".join(BLOCKLIST_ENTRY_TYPES)))
+        if not entry.get("id"):
+            errors.append("blocklist.json: entries[%d] has no id" % index)
+
+    if len(rules) > BLOCKLIST_RULES_MAX:
+        errors.append("blocklist.json: %d rules, the station accepts at most %d"
+                      % (len(rules), BLOCKLIST_RULES_MAX))
+
+    for index, rule in enumerate(rules):
+        where = "blocklist.json: rules[%d]" % index
+        if not isinstance(rule, dict):
+            errors.append("%s must be an object" % where)
+            continue
+        label = rule.get("label")
+        if not isinstance(label, str) or not label.strip():
+            errors.append("%s.label is required" % where)
+        elif len(label) > BLOCKLIST_LABEL_MAX:
+            errors.append("%s.label is %d chars, the station accepts at most %d"
+                          % (where, len(label), BLOCKLIST_LABEL_MAX))
+        if rule.get("field") not in BLOCKLIST_RULE_FIELDS:
+            errors.append("%s.field %r must be one of: %s"
+                          % (where, rule.get("field"), ", ".join(BLOCKLIST_RULE_FIELDS)))
+        values = rule.get("values")
+        if not isinstance(values, list) or not values:
+            errors.append("%s.values must be a non-empty list" % where)
+        elif not 1 <= len(values) <= BLOCKLIST_VALUES_MAX:
+            errors.append("%s.values has %d entries, the station accepts 1..%d"
+                          % (where, len(values), BLOCKLIST_VALUES_MAX))
+        else:
+            for value in values:
+                if not isinstance(value, str) or not value.strip():
+                    errors.append("%s.values must be non-empty strings" % where)
+                elif len(value) > BLOCKLIST_VALUE_MAX:
+                    errors.append("%s.values entry is %d chars, at most %d"
+                                  % (where, len(value), BLOCKLIST_VALUE_MAX))
+        season = rule.get("season")
+        if season is not None:
+            if not isinstance(season, dict):
+                errors.append("%s.season must be an object with from/to month and day" % where)
+            else:
+                for key in ("from", "to"):
+                    window = season.get(key)
+                    if not isinstance(window, dict):
+                        errors.append("%s.season.%s must be an object" % (where, key))
+                        continue
+                    month, day = window.get("month"), window.get("day")
+                    if not isinstance(month, int) or not 1 <= month <= 12:
+                        errors.append("%s.season.%s.month must be 1..12 (got %r)"
+                                      % (where, key, month))
+                    if not isinstance(day, int) or not 1 <= day <= 31:
+                        errors.append("%s.season.%s.day must be 1..31 (got %r)"
+                                      % (where, key, day))
+        for slug in rule.get("showIds") or []:
+            if slug in show_slugs:
+                continue
+            if isinstance(slug, str) and re.match(r"^[a-z0-9_]{3,32}$", slug):
+                # A server id left in the document is inert on the station: it
+                # simply never matches a show. Warn, do not fail the capture.
+                warnings.append("%s.showIds %r looks like a server id, not a show slug; "
+                                "it will never match" % (where, slug))
+            else:
+                warnings.append("%s.showIds %r is not a show in this repo" % (where, slug))
+
+
 def cmd_pull(config, args):
     tier, detail = detect_tier(config)
     print("tier      %s" % TIER_LABEL[tier], flush=True)
@@ -718,6 +959,12 @@ def cmd_pull(config, args):
                 "partial capture.")
         settings, schedule, losses = pull_lossy(config)
 
+    # Read the blocklist before writing anything, so a failure cannot leave
+    # instance/ half-written. Tier 2 reads the file it already has access to;
+    # tier 1 has no filesystem, so it uses the admin API.
+    blocklist_live = (read_blocklist_from_state(config) if tier == 2
+                      else fetch_blocklist(config))
+
     model = build_live_model(settings, schedule)
     if model["settings"] is None:
         model["settings"] = {}
@@ -729,7 +976,16 @@ def cmd_pull(config, args):
     }
     summary = write_instance(model, previous_lock, capture)
 
+    # The blocklist is the third config document, and admin HTTP returns it whole
+    # at BOTH tiers - the one entity tier 1 captures losslessly.
+    lock_now = json.loads((INSTANCE_DIR / "ids.lock.json").read_text(encoding="utf-8"))
+    blocklist = blocklist_to_repo(blocklist_live, lock_now)
+    write_json(INSTANCE_DIR / BLOCKLIST_FILE, blocklist)
+    summary["files"] += 1
+
     print("wrote     instance/ (%d files + ids.lock.json)" % summary["files"])
+    print("blocklist %d entries, %d rules"
+          % (len(blocklist["entries"]), len(blocklist["rules"])))
     print("redacted  %d of %d configured paths held a value -> %s"
           % (summary["redacted"], len(REDACT_PATHS), SENTINEL))
     print("personas  %d" % summary["personas"])
@@ -785,7 +1041,14 @@ def cmd_diff(config, args):
     report = compare_models(repo, live)
     print("direction instance/ -> live")
     print_diff(report)
+    repo_blocklist = load_repo_blocklist()
+    live_blocklist = blocklist_to_repo(fetch_blocklist(config), json.loads(
+        (INSTANCE_DIR / "ids.lock.json").read_text(encoding="utf-8")))
+    blocklist_report = compare_blocklist(repo_blocklist, live_blocklist)
+    print_blocklist_diff(blocklist_report)
     count = drift_count(report)
+    count += sum(len(blocklist_report[kind][label]) for kind in ("entries", "rules")
+                 for label in ("added", "removed", "changed"))
     print("result    %s" % ("in sync" if count == 0 else "%d change(s)" % count))
     return EXIT_OK if count == 0 else EXIT_DRIFT
 
@@ -886,7 +1149,7 @@ def select_backup_files(files, with_library=False):
     wanted, skipped = [], []
     for relative in files:
         name = relative.split("/")[0]
-        if relative in ("settings.json", "schedule.json"):
+        if relative in ("settings.json", "schedule.json", BLOCKLIST_FILE):
             continue  # written at the top level of the backup
         if relative in NEVER_COPY:
             skipped.append((relative, NEVER_COPY[relative]))
@@ -945,7 +1208,7 @@ def _restore_note(settings, state_dir, copied_dirs, skipped, with_library):
 def print_manifest(destination, manifest):
     groups, loose = {}, []
     for relative in manifest["copied"]:
-        if relative in ("settings.json", "schedule.json"):
+        if relative in ("settings.json", "schedule.json", BLOCKLIST_FILE):
             continue
         if "/" in relative:
             head = relative.split("/")[0]
@@ -954,10 +1217,15 @@ def print_manifest(destination, manifest):
             loose.append(relative)
     print("path      %s" % destination)
     print("files     %d (%d bytes)" % (manifest["files"], manifest["bytes"]))
-    print("copied    settings.json, schedule.json%s"
-          % (", " + ", ".join(sorted(loose)) if loose else ""))
+    carried = ["settings.json", "schedule.json"]
+    if BLOCKLIST_FILE in manifest["copied"]:
+        carried.append(BLOCKLIST_FILE)
+    print("copied    %s%s" % (", ".join(carried),
+                              ", " + ", ".join(sorted(loose)) if loose else ""))
     for head in sorted(groups):
         print("          %s/ (%d file%s)" % (head, groups[head], "" if groups[head] == 1 else "s"))
+    for note in manifest.get("notes") or []:
+        print("note      %s" % note)
     print("skipped   %d path(s)" % len(manifest["skipped"]))
     seen = set()
     for entry in manifest["skipped"]:
@@ -993,7 +1261,12 @@ def take_backup(config, base_dir=None, state=None, with_library=False):
     (destination / "settings.json").write_text(settings_text, encoding="utf-8")
     (destination / "schedule.json").write_text(schedule_text, encoding="utf-8")
 
-    total = len(settings_text) + len(schedule_text)
+    blocklist_text = None
+    if BLOCKLIST_FILE in state.list_files():
+        blocklist_text = state.read_bytes(BLOCKLIST_FILE).decode("utf-8")
+        (destination / BLOCKLIST_FILE).write_text(blocklist_text, encoding="utf-8")
+
+    total = len(settings_text) + len(schedule_text) + (len(blocklist_text) if blocklist_text else 0)
     for relative in wanted:
         payload = state.read_bytes(relative)
         target = destination / "state" / relative
@@ -1010,9 +1283,13 @@ def take_backup(config, base_dir=None, state=None, with_library=False):
     manifest = {
         "station": station,
         "at": stamp,
-        "files": 2 + len(wanted),
+        "files": 2 + (1 if blocklist_text is not None else 0) + len(wanted),
         "bytes": total,
-        "copied": ["settings.json", "schedule.json"] + wanted,
+        "copied": ["settings.json", "schedule.json"]
+                  + ([BLOCKLIST_FILE] if blocklist_text is not None else [])
+                  + wanted,
+        "notes": ["the station's own API zip omits blocklist.json, so a stock export/restore "
+                  "silently loses every ban; this backup carries it"],
         "skipped": [{"path": path, "reason": reason} for path, reason in skipped],
         "with_library": with_library,
     }
@@ -1059,12 +1336,18 @@ def diff_trimmed(config, repo):
     print("note      trimmed comparison: 14 persona fields and 19 show fields are not "
           "readable at tier 1, so they cannot drift here")
     print_diff(report)
+    live_blocklist = blocklist_to_repo(fetch_blocklist(config), json.loads(
+        (INSTANCE_DIR / "ids.lock.json").read_text(encoding="utf-8")))
+    blocklist_report = compare_blocklist(load_repo_blocklist(), live_blocklist)
+    print_blocklist_diff(blocklist_report)
     count = (len(report["personas"]["added"]) + len(report["personas"]["removed"])
              + len(report["personas"]["changed"]) + len(report["shows"]["added"])
              + len(report["shows"]["removed"]) + len(report["shows"]["changed"])
              + len(report["grid"]["changed_days"]))
     if not report["override"]["unchanged"]:
         count += 1
+    count += sum(len(blocklist_report[kind][label]) for kind in ("entries", "rules")
+                 for label in ("added", "removed", "changed"))
     print("result    %s" % ("in sync on the readable fields only (not a full match)"
                             if count == 0
                             else "%d change(s) in the readable fields" % count))
@@ -1712,6 +1995,12 @@ def validate_instance(root=None):
                     else:
                         counts["filled"] += 1
 
+    blocklist_path = root / BLOCKLIST_FILE
+    if blocklist_path.is_file():
+        blocklist = _load_json(blocklist_path, unreadable)
+        if blocklist is not None:
+            validate_blocklist(blocklist, set(shows), errors, warnings)
+
     if isinstance(lock, dict):
         lock_personas = lock.get("personas") or {}
         lock_shows = lock.get("shows") or {}
@@ -2278,8 +2567,9 @@ def load_backup(directory):
     # manifest against the files actually present
     listed = set(manifest.get("copied") or [])
     present = set()
-    for name in ("settings.json", "schedule.json"):
-        present.add(name)
+    for name in ("settings.json", "schedule.json", BLOCKLIST_FILE):
+        if (root / name).is_file():
+            present.add(name)
     state_dir = root / "state"
     if state_dir.is_dir():
         for path in state_dir.rglob("*"):
@@ -2311,8 +2601,16 @@ def load_backup(directory):
     if not isinstance(settings.get("personas"), list) or not settings.get("personas"):
         raise BackupError("settings.json has no personas")
 
+    blocklist_text = None
+    if (root / BLOCKLIST_FILE).is_file():
+        try:
+            json.loads((root / BLOCKLIST_FILE).read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise BackupError("%s is not valid JSON (%s)" % (root / BLOCKLIST_FILE, exc))
+        blocklist_text = (root / BLOCKLIST_FILE).read_bytes()
+
     assets = sorted(relative for relative in present
-                    if relative not in ("settings.json", "schedule.json"))
+                    if relative not in ("settings.json", "schedule.json", BLOCKLIST_FILE))
     return {
         "root": root,
         "manifest": manifest,
@@ -2320,6 +2618,7 @@ def load_backup(directory):
         "schedule": schedule,
         "settings_text": (root / "settings.json").read_bytes(),
         "schedule_text": (root / "schedule.json").read_bytes(),
+        "blocklist_text": blocklist_text,
         "assets": assets,
     }
 
@@ -2387,6 +2686,8 @@ def cmd_restore(config, args):
 
     targets = [("settings.json", backup["settings_text"]),
                ("schedule.json", backup["schedule_text"])]
+    if backup.get("blocklist_text") is not None:
+        targets.append((BLOCKLIST_FILE, backup["blocklist_text"]))
     for relative in backup["assets"]:
         targets.append((relative, None))  # read lazily: assets can be large
 

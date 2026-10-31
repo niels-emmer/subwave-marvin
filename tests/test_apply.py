@@ -49,6 +49,9 @@ class ApplyTestCase(unittest.TestCase):
             "lossy": self.lossy,
             "lost": ["show definitions: 19 of 26 fields"] if self.lossy else [],
         })
+        # the blocklist is a config document too; seed it so diff has a baseline
+        subwave.write_json(subwave.INSTANCE_DIR / subwave.BLOCKLIST_FILE,
+                            self.server.station.blocklist)
 
     # -- helpers -----------------------------------------------------------
     def config(self, **overrides):

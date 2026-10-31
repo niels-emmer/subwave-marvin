@@ -1483,8 +1483,11 @@ def validate_instance(root=None):
 
 
 def cmd_validate(config, args):
-    result = validate_instance()
-    print("validate  %s" % INSTANCE_DIR)
+    # --dir lets CI validate examples/demo, the committed schema reference.
+    # Without it this still validates instance/, exactly as before.
+    root = Path(args.dir).expanduser() if getattr(args, "dir", None) else INSTANCE_DIR
+    result = validate_instance(root)
+    print("validate  %s" % root)
     if result["unreadable"]:
         for line in result["unreadable"]:
             print("unreadable %s" % line)
@@ -1821,6 +1824,9 @@ def build_parser():
     char_grid.set_defaults(func=cmd_character)
 
     validate_cmd = sub.add_parser("validate", help="check instance/ before applying")
+    validate_cmd.add_argument("--dir", default=None,
+                              help="validate this station directory instead of instance/ "
+                                   "(e.g. examples/demo)")
     validate_cmd.set_defaults(func=cmd_validate)
 
     apply_cmd = sub.add_parser("apply", help="push instance/ to the station (dry run by default)")

@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_subwave import load_tool
 
 subwave = load_tool()
+REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "station.json"
+DEMO_DIR = REPO_ROOT / "examples" / "demo"
 
 
 class ValidateTestCase(unittest.TestCase):
@@ -223,6 +225,49 @@ class CaptureTests(ValidateTestCase):
         shutil.rmtree(self.root)
         code, output = self.run_validate()
         self.assertEqual(code, 2)
+
+
+class DemoDirTests(unittest.TestCase):
+    """`validate --dir` against examples/demo, the repo's schema reference.
+
+    CI runs exactly this; these tests are the offline proof behind that job: the
+    committed demo passes, and a schema regression in a copy of it is rejected.
+    """
+
+    def run_validate(self, root):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = subwave.cmd_validate(None, argparse.Namespace(dir=str(root)))
+        return code, buffer.getvalue()
+
+    def test_validate_takes_a_dir_and_still_defaults_to_instance(self):
+        self.assertIsNone(subwave.build_parser().parse_args(["validate"]).dir,
+                          "the default must stay instance/")
+        args = subwave.build_parser().parse_args(["validate", "--dir", "examples/demo"])
+        self.assertEqual(args.dir, "examples/demo")
+
+    def test_the_committed_demo_passes(self):
+        code, output = self.run_validate(DEMO_DIR)
+        self.assertEqual(code, 0, output)
+        self.assertIn("ok (2 personas, 2 shows, 168/168 cells filled)", output)
+        self.assertIn("0 warning(s)", output)
+
+    def test_a_schema_regression_in_a_copy_of_the_demo_is_rejected(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = tmp / "demo"
+        shutil.copytree(DEMO_DIR, root)
+
+        path = sorted((root / "character" / "personas").glob("*.json"))[0]
+        document = json.loads(path.read_text())
+        document.pop("soul")  # the system prompt: a field a trimmed read loses
+        path.write_text(json.dumps(document, indent=2))
+
+        code, output = self.run_validate(root)
+        self.assertEqual(code, 1, "a demo missing a persona field must fail the build")
+        self.assertIn(path.name, output)
+        self.assertIn("'soul'", output)
+        self.assertIn("1 error(s)", output)
 
 
 class ApplyRefusalTests(ValidateTestCase):

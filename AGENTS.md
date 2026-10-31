@@ -125,7 +125,7 @@ python3 scripts/subwave.py status    # tier, station, on-air state, repo sync
 python3 scripts/subwave.py pull      # live -> instance/, secrets redacted (--force replaces)
 python3 scripts/subwave.py diff      # drift vs live, exit 1 when drifted
 python3 scripts/subwave.py backup    # config + assets, outside the repo
-python3 scripts/subwave.py validate  # check instance/ before applying
+python3 scripts/subwave.py validate  # check instance/ before applying (--dir DIR for any station)
 python3 scripts/subwave.py character init --from demo   # scaffold a character layer (no network)
 python3 scripts/subwave.py character new-persona|new-show|add-to-grid   # author personas, shows, grid
 python3 scripts/subwave.py apply     # DRY RUN by default; --yes performs the writes

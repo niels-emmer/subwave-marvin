@@ -922,9 +922,14 @@ def build_steps(model, lock):
                       "label": "settings sections", "body": copy.deepcopy(settings),
                       "note": "%d top-level keys" % len(settings)})
     for slug, show in sorted((model.get("show_files") or {}).items()):
+        payload = copy.deepcopy(show)
+        if is_placeholder(payload.get("id"), "show"):
+            # a scaffolded show has only a local placeholder: omit it so the
+            # station assigns a real id, which persist_new_id writes back
+            payload.pop("id", None)
         steps.append({"method": "POST", "path": "/api/shows", "entity": "show",
                       "slug": slug, "label": "show %s" % slug,
-                      "body": {"show": copy.deepcopy(show)},
+                      "body": {"show": payload},
                       "note": "%d fields" % len(show)})
     return steps
 
@@ -1332,6 +1337,263 @@ def cmd_validate(config, args):
     return EXIT_OK
 
 
+# --------------------------------------------------------------------------
+# character: author the character layer, locally, with no network
+# --------------------------------------------------------------------------
+
+DAY_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+
+# A scaffolded entity gets a placeholder id so the lockfile can hold it before
+# the station has ever seen it. Shows have theirs stripped on the wire so the
+# station assigns a real one; personas are sent whole (the station stores the
+# array as given, so an id it has never seen simply becomes the id).
+PLACEHOLDER = {"persona": "p_local-", "show": "s_local-"}
+
+
+def is_placeholder(id_, kind):
+    return isinstance(id_, str) and id_.startswith(PLACEHOLDER[kind])
+
+
+def title_from_slug(slug):
+    return " ".join(part.capitalize() for part in slug.replace("_", "-").split("-") if part)
+
+
+def persona_defaults(slug, name=None):
+    """All 18 fields, at values that pass validate with no warnings."""
+    return {
+        "id": PLACEHOLDER["persona"] + slug,
+        "name": name or title_from_slug(slug),
+        "tagline": "",
+        "frequency": "moderate",
+        "scriptLength": "concise",
+        "djMode": True,
+        "linkStyle": "natural",
+        "humour": 5,
+        "localColour": 5,
+        "warmth": 5,
+        "soul": ("IDENTITY\nTODO: who this host is, in two or three sentences. Their job, their temperament, "
+                 "what they sound like at this hour.\n\n"
+                 "VOICE\nTODO: how they talk. Sentence length, what they notice, what they never do.\n\n"
+                 "CATCHPHRASES\nTODO: one or two lines they could actually say."),
+        "musicLean": [],
+        "language": "",
+        "voiceStyle": "",
+        "avatar": "",
+        "tts": {"engine": "kokoro", "cloudProvider": "", "voice": "", "gainDb": 0, "speed": 1},
+        "skills": [],
+        "tags": ["todo"],
+    }
+
+
+def show_defaults(slug, name=None, persona_id=""):
+    """All 26 fields, at values that pass validate with no warnings."""
+    return {
+        "id": PLACEHOLDER["show"] + slug,
+        "name": name or title_from_slug(slug),
+        "topic": "TODO: the brief for this show, in one or two sentences.",
+        "personaId": persona_id,
+        "guestPersonaIds": [],
+        "banter": False,
+        "pauseTalk": False,
+        "programme": True,
+        "segmentSkill": "",
+        "preparationSkill": "",
+        "moods": [],
+        "themeId": "",
+        "genres": [],
+        "energies": [],
+        "eras": [],
+        "vocals": "",
+        "filtersStrict": False,
+        "maxTrackSeconds": 600,
+        "minTrackLengthSeconds": 60,
+        "fadeAtShowEnd": False,
+        "playlistIds": [],
+        "playlistStrict": False,
+        "playlistExhaust": False,
+        "playlistInOrder": False,
+        "excludedPlaylistIds": [],
+        "tags": ["todo"],
+    }
+
+
+def blank_character():
+    return {
+        "name": "New Station",
+        "description": "TODO: what this station is for, in one sentence.",
+        "locale": "en-GB",
+        "timezone": "Europe/London",
+        "theme": "classic-dark",
+        "houseRules": ["TODO: a rule the hosts must follow."],
+    }
+
+
+def _read_lock(root):
+    path = root / "ids.lock.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _save_lock(root, lock):
+    write_json(root / "ids.lock.json", lock)
+
+
+def _require_character(root):
+    if not (root / "character").is_dir():
+        raise ToolError("no character layer at %s - run: subwave.py character init" % (root / "character"))
+
+
+def _slugs(root, kind):
+    return sorted(p.stem for p in (root / "character" / kind).glob("*.json"))
+
+
+def cmd_character(config, args):
+    """Dispatch. Never touches the network: pure local file authoring."""
+    root = INSTANCE_DIR
+    action = args.character_command
+
+    if action == "init":
+        if root.exists() and not args.force:
+            raise ToolError("instance/ already exists (%s). Refusing to overwrite: re-run with "
+                            "--force to replace it." % describe_instance(root))
+        if root.exists():
+            shutil.rmtree(root)
+
+        if args.source == "demo":
+            source = REPO_ROOT / "examples" / "demo"
+            if not source.is_dir():
+                raise ToolError("examples/demo is missing from this checkout")
+            shutil.copytree(source / "character", root / "character")
+            shutil.copy2(source / "ids.lock.json", root / "ids.lock.json")
+            print("init      copied examples/demo (the fictional station)")
+        else:
+            persona_slug, show_slug = "first-host", "first-show"
+            persona = persona_defaults(persona_slug)
+            show = show_defaults(show_slug, persona_id=persona["id"])
+            write_json(root / "character" / "character.json", blank_character())
+            write_json(root / "character" / "personas" / ("%s.json" % persona_slug), persona)
+            write_json(root / "character" / "shows" / ("%s.json" % show_slug), show)
+            write_json(root / "character" / "schedule.json",
+                       {"schedule": {str(day): [show_slug] * 24 for day in range(7)},
+                        "override": None})
+            _save_lock(root, {
+                "version": 1,
+                "personas": {persona_slug: persona["id"]},
+                "shows": {show_slug: show["id"]},
+                "ids": {persona["id"]: persona_slug, show["id"]: show_slug},
+                "capture": {"tier": 2, "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "lossy": False, "lost": []},
+            })
+            print("init      wrote a blank character (%s, %s)" % (persona_slug, show_slug))
+        print("next      subwave.py validate")
+        return EXIT_OK
+
+    _require_character(root)
+
+    if action == "new-persona":
+        slug = args.slug
+        path = root / "character" / "personas" / ("%s.json" % slug)
+        if path.exists():
+            raise ToolError("persona %r already exists (%s)" % (slug, path))
+        persona = persona_defaults(slug, args.name)
+        write_json(path, persona)
+        lock = _read_lock(root) or {"version": 1, "personas": {}, "shows": {}, "ids": {}}
+        lock.setdefault("personas", {})[slug] = persona["id"]
+        lock.setdefault("ids", {})[persona["id"]] = slug
+        _save_lock(root, lock)
+        print("persona   %s -> %s" % (slug, persona["id"]))
+        print("note      id is a placeholder; it is sent whole, so the station adopts it")
+        print("next      fill in soul, then: subwave.py validate")
+        return EXIT_OK
+
+    if action == "new-show":
+        slug = args.slug
+        path = root / "character" / "shows" / ("%s.json" % slug)
+        if path.exists():
+            raise ToolError("show %r already exists (%s)" % (slug, path))
+        lock = _read_lock(root) or {"version": 1, "personas": {}, "shows": {}, "ids": {}}
+        personas = lock.get("personas") or {}
+        if args.persona:
+            if args.persona not in personas:
+                raise ToolError("no persona %r in the lockfile; known: %s"
+                                % (args.persona, ", ".join(sorted(personas)) or "none"))
+            persona_slug, persona_id = args.persona, personas[args.persona]
+        elif len(personas) == 1:
+            persona_slug, persona_id = next(iter(personas.items()))
+        else:
+            raise ToolError("--persona is required; known personas: %s"
+                            % (", ".join(sorted(personas)) or "none"))
+        show = show_defaults(slug, args.name, persona_id)
+        write_json(path, show)
+        lock.setdefault("shows", {})[slug] = show["id"]
+        lock.setdefault("ids", {})[show["id"]] = slug
+        _save_lock(root, lock)
+        print("show      %s -> %s (host %s)" % (slug, show["id"], persona_slug))
+        print("note      no grid entry yet; use: character add-to-grid %s --days ..." % slug)
+        print("next      fill in topic/genres/moods, then: subwave.py validate")
+        return EXIT_OK
+
+    if action == "add-to-grid":
+        slug = args.slug
+        if slug not in _slugs(root, "shows"):
+            raise ToolError("no show %r in instance/character/shows; known: %s"
+                            % (slug, ", ".join(_slugs(root, "shows")) or "none"))
+        days = []
+        for token in args.days.split(","):
+            name = token.strip().lower()[:3]
+            if name not in DAY_NAMES:
+                raise ToolError("unknown day %r; use sun,mon,tue,wed,thu,fri,sat" % token.strip())
+            days.append(DAY_NAMES[name])
+        if not 0 <= args.from_hour <= 24 or not 0 <= args.to_hour <= 24:
+            raise ToolError("hours must be 0..24")
+        if args.from_hour >= args.to_hour:
+            raise ToolError("--from must be earlier than --to (hours are half-open: 09 to 12 is "
+                            "09:00, 10:00, 11:00)")
+
+        path = root / "character" / "schedule.json"
+        schedule_doc = json.loads(path.read_text(encoding="utf-8"))
+        grid = schedule_doc.get("schedule") or {}
+        hours = list(range(args.from_hour, args.to_hour))
+
+        changes, conflicts = [], []
+        for day in days:
+            cells = grid.get(str(day)) or []
+            for hour in hours:
+                current = cells[hour] if hour < len(cells) else None
+                if current == slug:
+                    continue
+                changes.append((day, hour, current))
+                if current:
+                    conflicts.append((day, hour, current))
+
+        day_label = {v: k for k, v in DAY_NAMES.items()}
+        if not changes:
+            print("grid      no change: %s already owns those cells" % slug)
+            return EXIT_OK
+        for day, hour, current in changes:
+            print("cell      %s %02d:00  %s -> %s"
+                  % (day_label[day], hour, current or "(empty)", slug))
+        if conflicts and not args.replace:
+            sys.stdout.flush()  # show the cells before the refusal on stderr
+            raise ToolError("%d cell(s) already hold another show (%s). Re-run with --replace to "
+                            "take them over." % (len(conflicts), ", ".join(
+                                sorted({c for _, _, c in conflicts}))))
+
+        for day, hour, _ in changes:
+            cells = grid.setdefault(str(day), [None] * 24)
+            while len(cells) < 24:
+                cells.append(None)
+            cells[hour] = slug
+        schedule_doc["schedule"] = grid
+        write_json(path, schedule_doc)
+        print("grid      %d cell(s) changed across %s" % (len(changes), ", ".join(
+            sorted({day_label[d] for d, _, _ in changes}))))
+        return EXIT_OK
+
+    raise ToolError("unknown character command %r" % action)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="subwave.py",
@@ -1350,6 +1612,34 @@ def build_parser():
 
     diff = sub.add_parser("diff", help="read-only drift report")
     diff.set_defaults(func=cmd_diff)
+
+    character = sub.add_parser("character", help="author the character layer locally (no network)")
+    char_sub = character.add_subparsers(dest="character_command", required=True)
+
+    char_init = char_sub.add_parser("init", help="create instance/character/")
+    char_init.add_argument("--from", dest="source", choices=("demo", "blank"), default="blank",
+                           help="demo copies examples/demo; blank writes a placeholder station")
+    char_init.add_argument("--force", action="store_true", help="replace an existing instance/")
+    char_init.set_defaults(func=cmd_character)
+
+    char_persona = char_sub.add_parser("new-persona", help="scaffold a persona with all 18 fields")
+    char_persona.add_argument("slug")
+    char_persona.add_argument("--name")
+    char_persona.set_defaults(func=cmd_character)
+
+    char_show = char_sub.add_parser("new-show", help="scaffold a show with all 26 fields")
+    char_show.add_argument("slug")
+    char_show.add_argument("--name")
+    char_show.add_argument("--persona", help="persona slug to host it")
+    char_show.set_defaults(func=cmd_character)
+
+    char_grid = char_sub.add_parser("add-to-grid", help="fill grid cells with a show")
+    char_grid.add_argument("slug")
+    char_grid.add_argument("--days", required=True, help="comma separated: mon,tue")
+    char_grid.add_argument("--from", dest="from_hour", type=int, required=True, help="first hour, 0-24")
+    char_grid.add_argument("--to", dest="to_hour", type=int, required=True, help="hour after the last")
+    char_grid.add_argument("--replace", action="store_true", help="take over cells that hold another show")
+    char_grid.set_defaults(func=cmd_character)
 
     validate_cmd = sub.add_parser("validate", help="check instance/ before applying")
     validate_cmd.set_defaults(func=cmd_validate)

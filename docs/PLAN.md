@@ -131,14 +131,17 @@ Python 3 stdlib only — no third-party deps, so the toolkit runs anywhere an ag
 | --- | --- | --- |
 | **P0 — capture** *(done)* | `.gitignore` first, then verbatim `settings.json` + `schedule.json` into `instance/` | instance files parse; 6 shows; 168/168 cells; `git status` and `git ls-files` never mention `instance/` |
 | **P1 — read-only tool** *(done)* | `status`, `pull`, `diff`, `backup`, tier detection, unit tests | `diff` reports clean straight after `pull`; tier 1 refuses or states exactly what it loses; `python3 -m unittest discover -s tests` green |
-| **P2 — character authoring** *(core done)* | character layer files, slug↔id lockfile, splitting/reassembly, `validate` | `pull` round-trips `instance/` byte-identically (modulo redaction); `validate` catches a typo'd field before it can be merged away |
+| **P2 — character authoring** *(done)* | `character init/new-persona/new-show/add-to-grid`, character layer files, slug↔id lockfile, `validate` | `pull` round-trips `instance/` byte-identically (modulo redaction); `validate` catches a typo'd field before it can be merged away |
 | **P3 — apply** *(done, mock-verified)* | `validate` gate, ordered writes, dry run by default, lossy/sentinel/mid-show/backup guards, id assignment | proven against `tests/mock_station.py`: dry run sends nothing, shows sent whole, grid last, second apply a no-op. **Not yet run against the live station** |
 | **P4 — skills** *(merged, unrehearsed)* | `skills/<name>/SKILL.md`: new show, diagnose a host, backup | an agent completes each task from the skill alone, at the tier it announces — **not yet rehearsed end to end** |
 | **P5 — public readiness** | scrub, LICENSE, branch protection, repo settings | **human only**; the agent prepares a checklist and changes nothing on GitHub |
 
 **What remains.** P5 public readiness (scrub review, LICENSE, branch protection, repo settings) is
-human-only and untouched. P2's mechanics are done, but authoring a brand-new persona from scratch —
-rather than editing a pulled one — has no end-to-end rehearsal. P4's skills are merged and consistent
+human-only and untouched. P2 is done: `character init --from blank|demo`, `new-persona`, `new-show` and
+`add-to-grid` scaffold valid entities that pass `validate` with zero warnings and produce a coherent
+`apply` plan immediately. Scaffolded entities carry a local placeholder id (`p_local-…`, `s_local-…`);
+a show's is stripped on the wire so the station assigns a real one, which is written back to the file
+and the lockfile. P4's skills are merged and consistent
 with the tool, but nobody has yet completed a task from a skill alone. And the write path has never
 been exercised against a real station: everything above is mock-verified.
 

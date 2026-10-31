@@ -126,6 +126,8 @@ python3 scripts/subwave.py pull      # live -> instance/, secrets redacted (--fo
 python3 scripts/subwave.py diff      # drift vs live, exit 1 when drifted
 python3 scripts/subwave.py backup    # settings.json + schedule.json, outside the repo
 python3 scripts/subwave.py validate  # check instance/ before applying
+python3 scripts/subwave.py character init --from demo   # scaffold a character layer (no network)
+python3 scripts/subwave.py character new-persona|new-show|add-to-grid   # author personas, shows, grid
 python3 scripts/subwave.py apply     # DRY RUN by default; --yes performs the writes
 ```
 

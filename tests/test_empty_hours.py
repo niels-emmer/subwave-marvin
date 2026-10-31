@@ -58,6 +58,9 @@ class EmptyHoursTests(unittest.TestCase):
         model = subwave.build_live_model(document["settings"], document["schedule"])
         subwave.write_instance(model, {}, capture={
             "tier": 2, "at": "2026-10-31T00:00:00Z", "lossy": False, "lost": []})
+        # the blocklist is a config document too; seed it so diff has a baseline
+        subwave.write_json(subwave.INSTANCE_DIR / subwave.BLOCKLIST_FILE,
+                            self.server.station.blocklist)
 
     def _restore_environ(self):
         os.environ.clear()

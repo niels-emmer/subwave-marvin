@@ -100,6 +100,10 @@ every show and the whole grid do not. So `backup` copies the config **and** thos
   costs seconds of stream interruption, so bundle such changes. Passwords and the rest apply live.
 - Never commit instance data. `instance/` and `.env` are gitignored, and `scripts/check-secrets.sh`
   blocks live values from entering a commit.
+- **The blocklist is a config document, not an asset.** It lives at `${STATE_DIR}/blocklist.json` and the
+  station's own API zip omits it, so a stock export/restore silently loses every ban. `pull` reads it over
+  admin HTTP at both tiers (the one entity tier 1 captures losslessly), `backup` carries it, `restore`
+  puts it back with the other config files.
 - **`character.json` is the only home for station identity** — name, description, locale, timezone,
   theme, houseRules. `settings.json` must not carry those six keys: `pull` strips them and `apply`
   merges them back. A duplicate copy is how editing the character layer once became a silent no-op.
@@ -148,6 +152,7 @@ python3 scripts/subwave.py apply     # DRY RUN by default; --yes performs the wr
 ## Layout
 
 `instance/` is this deployment and is gitignored: `settings.json` (secrets redacted),
+`blocklist.json` (the third config document: bans and rules),
 `character/character.json` for identity and house rules, `character/personas/*.json`,
 `character/shows/*.json`, `character/schedule.json` (the grid keyed by slug), and
 `ids.lock.json` — generated, never hand-edited, holding the slug→id map, the `capture`

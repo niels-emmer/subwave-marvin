@@ -9,6 +9,7 @@ proven without touching a live station:
   GET  /api/state           public; station identity and current state
   GET  /api/personas        public; TRIMMED to 4 fields per persona
   GET  /api/schedule        public; shows TRIMMED to 7 of 26 fields
+  GET  /api/library/blocklist  admin; the third config document, returned whole
   GET  /api/settings        admin; the 19-key UI summary, NOT settings.json
   POST /api/settings        admin; SHALLOW merge - a top-level key replaces wholesale
   POST /api/shows           admin; upsert by show.id, assigns an id when absent,
@@ -65,12 +66,28 @@ SETTINGS_SUMMARY_KEYS = (
 )
 
 
+DEFAULT_BLOCKLIST = {
+    "entries": [
+        {"type": "track", "id": "subsonic-1", "name": "Mock Banned Track",
+         "artist": "Mock Artist", "album": "Mock Album",
+         "addedAt": "2026-10-01T00:00:00.000Z"},
+    ],
+    "rules": [
+        {"id": "rule-0001", "label": "No christmas music", "field": "genre",
+         "values": ["Christmas"], "season": None, "showIds": [],
+         "addedAt": "2026-10-01T00:00:00.000Z"},
+    ],
+}
+
+
 class Station:
     """In-memory station state plus the semantics of each route."""
 
-    def __init__(self, settings, schedule, admin_user, admin_pass, max_shows=12):
+    def __init__(self, settings, schedule, admin_user, admin_pass, max_shows=12,
+                 blocklist=None):
         self.settings = copy.deepcopy(settings)
         self.schedule = copy.deepcopy(schedule)
+        self.blocklist = copy.deepcopy(blocklist if blocklist is not None else DEFAULT_BLOCKLIST)
         self.admin_user = admin_user
         self.admin_pass = admin_pass
         self.max_shows = max_shows
@@ -117,6 +134,14 @@ class Station:
                          for p in self.settings.get("personas") or []],
             "timezone": self.settings.get("timezone"),
             "locale": self.settings.get("locale"),
+        }
+
+    def public_blocklist(self):
+        """The stored document plus the live fields the API adds."""
+        return {
+            "entries": [dict(entry, active=True) for entry in self.blocklist.get("entries") or []],
+            "rules": [dict(rule, active=True, matchCount=0)
+                      for rule in self.blocklist.get("rules") or []],
         }
 
     def public_state(self):
@@ -296,6 +321,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/now-playing":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.now_playing())
+        if path == "/api/library/blocklist":
+            if not self._admin("GET", path, None):
+                return
+            self.station.record("GET", path, None, True)
+            return self._send(200, self.station.public_blocklist())
         if path == "/api/state":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_state())
@@ -338,6 +368,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         path = urlsplit(self.path).path
         body = self._body()
+        if path == "/api/library/blocklist":
+            if not self._admin("GET", path, None):
+                return
+            self.station.record("GET", path, None, True)
+            return self._send(200, self.station.public_blocklist())
         if path == "/api/state":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_state())
@@ -353,13 +388,15 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found", "path": path})
 
 
-def build_state_dir(root, settings, schedule):
+def build_state_dir(root, settings, schedule, blocklist=None):
     """A state dir with the shape the real one has: config, assets, and the
     expensive library.db that a backup should skip by default."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     (root / "settings.json").write_text(json.dumps(settings, indent=2))
     (root / "schedule.json").write_text(json.dumps(schedule, indent=2))
+    (root / "blocklist.json").write_text(
+        json.dumps(blocklist if blocklist is not None else DEFAULT_BLOCKLIST, indent=2))
 
     skill = root / "skills" / "demo-skill"
     skill.mkdir(parents=True, exist_ok=True)
@@ -400,7 +437,8 @@ def start_mock(seed=None, admin=("mock-admin", "mock-pass"), port=0, max_shows=1
         seed = json.loads(FIXTURE.read_text(encoding="utf-8"))
     document = copy.deepcopy(seed)
     station = Station(document["settings"], document["schedule"],
-                      admin[0], admin[1], max_shows=max_shows)
+                      admin[0], admin[1], max_shows=max_shows,
+                      blocklist=document.get("blocklist"))
     server = MockServer(("127.0.0.1", port), station)
     # short poll interval: shutdown() waits for the loop, and tests start
     # and stop many servers
@@ -413,7 +451,8 @@ def start_mock(seed=None, admin=("mock-admin", "mock-pass"), port=0, max_shows=1
     server.state_dir = None
     if with_state_dir:
         server.state_dir = build_state_dir(
-            Path(tempfile.mkdtemp(prefix="mock-state-")), station.settings, station.schedule)
+            Path(tempfile.mkdtemp(prefix="mock-state-")), station.settings,
+            station.schedule, station.blocklist)
     server.admin = admin
 
     def stop():

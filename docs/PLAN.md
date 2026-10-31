@@ -114,6 +114,10 @@ scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE
 - **`apply`** is idempotent and ordered: personas → shows → settings sections → grid last, because shows
   reference personas and the grid references shows. Secret-preserving merge keeps live credentials when
   a section containing them is sent. Deletes are never part of `apply`.
+- **Blocklist capture** covers the third config document (`${STATE_DIR}/blocklist.json`): bans and rules,
+  read over admin HTTP at both tiers, validated against the field enum and limits, compared by `diff`,
+  carried by `backup` (the station's own zip omits it) and put back by `restore`. Authoring and `apply`
+  are deliberately not part of it.
 - **`restore`** is the other half of `backup`: dry run by default, state files first then assets,
   refuses a backup that is incomplete or whose grid does not resolve, refuses while on air unless
   `--force-now`, verifies the written station and rolls back to the previous state if it does not

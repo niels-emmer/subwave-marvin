@@ -49,8 +49,10 @@ sweep for deployment values:
 git grep -nIE '([0-9]{1,3}\.){3}[0-9]{1,3}|SUBWAVE_(HOST|BASE_URL|STATE_DIR)=.+|[A-Za-z0-9-]+\.(ts\.net|local|lan)' -- ':!tests'
 ```
 
-Expected output is one line: the loopback address in the `.env.example` comment. Anything else — a
-hostname, an ssh alias, a routable IP, a non-empty deployment value — is a finding.
+Expected output is four lines: the loopback address in the `.env.example` comment, plus three placeholder
+`SUBWAVE_HOST=` / `SUBWAVE_STATE_DIR=` lines in `CHANGELOG.md` and `scripts/subwave.py` (the discovery
+messages). Anything else — a hostname, an ssh alias, a routable IP, or a non-empty deployment value — is a
+finding.
 
 **Why:** tracked files are exactly the bytes GitHub serves, so this is the whole public surface. Ids
 matter most because they are unguessable: an id in the repo points at one real station, and a persona or
@@ -122,7 +124,7 @@ python3 scripts/subwave.py --help
 ```
 
 The commands are `status`, `pull`, `diff`, `validate`, `apply`, `backup`, `restore`, `character`,
-`blocklist`, `skills` and `onair`. The README appendix lists all eleven with their flags, and `--help`
+`blocklist`, `skills` and `onair`. The README appendix lists all eleven with their main flags, and `--help`
 is the authority.
 
 **Why:** private-repo habits are invisible to the author and are the first thing a visitor trips over —

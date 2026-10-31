@@ -117,7 +117,7 @@ Defaults are a starting point, not a decision. Each of these is set the same way
 | --- | --- | --- |
 | `frequency` | `silent`, `quiet`, `moderate`, `chatty`, `aggressive` | How often the host speaks between records. It is an ordered ladder, so pick the rung, not a mood. `silent` means it never speaks. |
 | `scriptLength` | `one-liner`, `concise`, `extended`, `storyteller` | How long each link runs. Also a ladder, shortest to longest. |
-| `djMode` | `true` / `false` | Whether the host talks at all. `false` is a silent jukebox; only choose it if that is the brief. |
+| `djMode` | `true` / `false` | Gates back-announce and transition talk — the links over the seams between records. It is **not** the silence switch; the DJ still speaks on the `frequency` dial. Leave it `true` unless the brief asks for no back-announce. |
 | `linkStyle` | `natural`, `announce` | The register of a link: conversational hand-off, or presenter announcement. |
 | `humour` | integer | Higher is more jokes. |
 | `localColour` | integer | Higher means more local references and detail. |

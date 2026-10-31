@@ -76,7 +76,7 @@ from the repo, never a read-modify-write of a trimmed read.
 | | Tier 1: HTTP only | Tier 2: host access |
 | --- | --- | --- |
 | Needs | `SUBWAVE_BASE_URL` + admin credentials | + `SUBWAVE_HOST`, `SUBWAVE_STATE_DIR`, ssh, `docker exec` |
-| Create / update | yes | yes |
+| Create / update | author from scratch only — a lossy capture cannot be applied | yes |
 | Read personas | trimmed (4 fields) | full |
 | Read shows | trimmed (7 of 26) | full |
 | Read the grid | yes | yes |

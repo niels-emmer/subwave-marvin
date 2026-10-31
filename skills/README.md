@@ -17,29 +17,15 @@ findable only by an agent that happens to list this directory.
 
 ## The five
 
-| Skill | Answers | Say something like |
-| --- | --- | --- |
-| [`add-host`](add-host/SKILL.md) | create a persona from a character brief and put it on air | "add a host", "new DJ", "new persona", "hire someone" |
-| [`new-show`](new-show/SKILL.md) | create a programme and put it on the grid | "new show", "add a show", "schedule a programme", "give <persona> a Sunday slot" |
-| [`explain-host`](explain-host/SKILL.md) | diagnose why a persona talks the way it does | "why does <persona> talk so much", "too chatty", "persona tuning", "make the DJ say less" |
-| [`tune-host`](tune-host/SKILL.md) | change a persona's dials, or one show's talk settings | "make <persona> warmer", "tune the host", "less chatty", "change the dials" |
-| [`backup`](backup/SKILL.md) | take a config backup that can actually be restored | "backup", "back up the station", "export the config", "save the config" |
+`add-host`, `new-show`, `explain-host`, `tune-host` and `backup`. The trigger sentences — and which verb
+decides when a request fits two of them — live in [`AGENTS.md`](../AGENTS.md) under **Which procedure to
+load**. Keep them there: a second copy here is a second thing to fall out of date.
 
-## How an agent picks one
+## Why diagnosis and change are separate skills
 
-1. Match the verb in the user's sentence against the descriptions. **Create/place** something →
-   `new-show`; **create a host** → `add-host`. **Explain/diagnose** an existing host →
-   `explain-host`, and **change** one → `tune-host`. **Copy/preserve** state → `backup`.
-2. If two seem to fit, the verb decides: "why does the new show's host talk so much" is
-   `explain-host` (diagnosis) and only becomes `tune-host` (the host's dials) or `new-show` (the
-   programme) if the user then asks to change something. Diagnosis and change are separate skills on
-   purpose: tuning before diagnosing is how a station gets two changes at once and no idea which
-   one helped.
-3. If none fit, do not improvise a procedure: read `AGENTS.md`, run
-   `python3 scripts/subwave.py status`, and ask. `apply` dry-runs by default and needs `--yes` to
-   write; its guards, not the skill, decide whether a write may proceed.
-4. Whichever skill loads, announce the tier it is running at and whether the station is on air
-   before doing anything else.
+`explain-host` only reads; `tune-host` writes. A host that talks too much has one change at the end of it,
+and running the diagnosis first is what stops a station getting two changes at once and no idea which one
+helped. `AGENTS.md` carries the routing rule and the tier announcement every skill owes the operator.
 
 ## Writing another
 

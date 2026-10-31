@@ -45,7 +45,7 @@ Persona file — `instance/character/personas/<persona>.json`:
 | --- | --- | --- |
 | `frequency` | **how often** the DJ speaks between tracks. Values seen in the shape include `moderate` and `chatty`. | The primary volume dial. A chatty setting means a link after most records. |
 | `scriptLength` | **how long** each link runs. `storyteller` is long-form, `concise` short. | Long links make the same number of links feel relentless. |
-| `djMode` | Whether the persona talks at all. `false` is a silent host. | Only a cause when it is on and the user expected silence. |
+| `djMode` | Gates back-announce and transition talk — the links over the seams between records. **Not** the silence switch; `frequency` is. | Not a volume control, so it cannot cause "too much". It explains "it announces every track", not "it talks too much". |
 | `linkStyle` | The register and hand-off of a link (e.g. `natural`). | Shape, not volume. Tune last. |
 | `humour` | Integer tone dial; higher is more jokes. | Perceived chatter, not frequency. |
 | `localColour` | Integer; higher means more local references and detail. | Adds words per link. |
@@ -123,7 +123,7 @@ omnipresent even at a moderate frequency.
 ### 4. Rank the causes, in this order
 
 1. **`banter: true` with guests** — two voices; usually the answer.
-2. `djMode: true` + a chatty `frequency`.
+2. A `chatty` or `aggressive` `frequency`.
 3. A long `scriptLength` (e.g. `storyteller`).
 4. `programme: true`, or a non-empty `segmentSkill` / `preparationSkill`.
 5. `soul` prose that asks for length or stories, or a `houseRules` entry that does.

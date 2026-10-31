@@ -1,150 +1,115 @@
 # subwave-marvin
 
-An agent-agnostic toolkit for running a self-hosted **SUB/WAVE** radio station from an agent session. One
-Icecast stream, so everyone hears the same track at once; the DJ picks from your own Navidrome library and
-talks between tracks. You describe the station in files, review the diff, and apply it — or ask an agent to.
+You run a SUB/WAVE station. This lets you look after it by talking to your agent instead of clicking
+through the admin console. Your station's settings live as files in a git repo, so you can see what
+changed, undo it, and keep a history of how the station got to sound the way it does.
 
-## Requirements
+## What you can ask for
 
-`python3` (standard library only, no dependencies, no virtualenv), a running SUB/WAVE station, and that
-station's admin credentials.
+### Finding out what is going on
 
-## Two tiers
+**"What's on air right now?"**
+Tells you the track, the show and the host, and whether the station is actually streaming.
 
-|  | Tier 1: HTTP only | Tier 2: host access |
-| --- | --- | --- |
-| Needs | base URL + admin credentials | also ssh and `docker exec` |
-| Read personas and shows | trimmed | full |
-| Read the grid | yes | yes |
-| Backup | **without the schedule** | complete |
+**"What changed since last week?"**
+Compares your files against the live station and lists what differs — by host, by show, by grid cell.
+Nothing is changed by asking.
 
-Tier 1 cannot read full show definitions — the API returns 7 of a show's 26 fields — and it cannot take a
-complete backup, because the station's own export omits the schedule. Both need tier 2. Every command
-prints the tier it is running at.
+### Fixing how a host sounds
 
-## Setup
+**"Why does <host> talk so much?"**
+Reads that host's dials, their written character and the shows they present, then proposes the smallest
+change that would fix it. It does not guess: if the answer is "the show is set to talk a lot", it says so
+and shows you the field.
 
-```sh
-cp .env.example .env
-```
+**"Make <host> warmer"** or **"make this show less chatty"**
+Changes that one setting, checks the result, and shows you the before and after. Nothing goes live until
+you say so.
 
-Six variables, read from `.env` or the environment:
+### Adding people and programmes
 
-| Variable | |
+**"Add a host"**
+Scaffolds a new host — but it will ask you to describe the character first, because a host's soul *is* the
+prompt the DJ writes from. A blank soul produces a blank presenter.
+
+**"Make me a new show"**, then **"put it on Sunday mornings"**
+Creates the show and fills the hours you name in the weekly grid. It will show you which cells it is about
+to change, including any it would take from another show.
+
+### Keeping things out
+
+**"Stop playing <artist>"**
+Adds a ban. Bans apply to the whole station, or only while a particular show is on air.
+
+**"Block Christmas music until December"**
+This one is worth reading twice. A seasonal rule's window is **when the rule is paused**, not when it
+applies — so a December window means the ban is off during December and on for the other eleven months.
+If you want the opposite, say so and the window goes the other way round.
+
+### Protecting the station
+
+**"Back up the station"**
+Takes a copy of the settings, the shows, the schedule, the station's skills and its media manifests — and
+writes a note saying where each file goes back. This is deliberately more than the console's export, which
+leaves out the schedule and therefore every show and the whole grid.
+
+**"Put the station back to what's in git"**
+Applies your files to the station. It shows you every change first and sends nothing until you confirm.
+
+**"Undo the last change"**
+Puts a backup back, or applies an earlier commit — your choice, depending on whether you want the station
+as it was ten minutes ago or as it was last week.
+
+### Live, right now
+
+**"Say something on air"**, **"skip this track"**, **"play a jingle"**
+These change what is happening this second. They are the only things in the toolkit that do, they need your
+explicit go-ahead each time, and a skip additionally needs to know which track you meant — or your
+permission to skip whatever is playing.
+
+## What it cannot do yet
+
+- **Avatars and station imaging.** Jingles, sound effects and beds are backed up but not authored here.
+  Use the station's admin console for those.
+- **Library work.** Tagging, building playlists, searching your collection — that is Navidrome's job, and
+  the station's own tools do it better than a config repo could.
+- **Anything that bypasses the station's review step for a skill's custom script.** A skill can carry a
+  small script, and the station deliberately refuses to run one until a person has read it and trusted it.
+  Nothing here shortcuts that, and nothing should.
+
+## Getting started
+
+You need three things: the station's address, its admin username and its admin password. Put them in a
+`.env` file (copy `.env.example`), then ask your agent for the station's status.
+
+If your agent can also reach the machine the station runs on, tell it the ssh host and the station's data
+directory. That unlocks the fuller picture: complete show definitions, and a backup that can actually
+restore the station. Without it you get a trimmed view and a backup that cannot bring the programming back.
+
+---
+
+## Appendix: the commands, for the curious
+
+Everything above is the agent driving these. You can run them yourself.
+
+| Command | What it does |
 | --- | --- |
-| `SUBWAVE_BASE_URL` | the station's admin API, e.g. `http://127.0.0.1:7700`; a tunnel is fine |
-| `SUBWAVE_ADMIN_USER` | the station's `ADMIN_USER` |
-| `SUBWAVE_ADMIN_PASS` | the station's `ADMIN_PASS` |
-| `SUBWAVE_STATION_PASSWORD` | the listener password (`settings.privacy.password`) |
-| `SUBWAVE_HOST` | tier 2: the ssh host |
-| `SUBWAVE_STATE_DIR` | tier 2: the state dir **inside the controller container**, e.g. `/var/sub-wave` |
+| `status` | tier, station, what is on air, whether your files match the station |
+| `pull` | copy the station's settings into `instance/` (`--force` replaces, `--allow-lossy` accepts a partial copy) |
+| `diff` | list what differs between your files and the station |
+| `validate` | check your files before applying them (`--dir` for another station directory) |
+| `apply` | send your files to the station; dry run unless `--yes` |
+| `backup` | config, assets and schedule, outside the repo (`--with-library` adds the audio analysis) |
+| `restore` | put a backup back; dry run unless `--yes` |
+| `character` | create and edit hosts, shows and the weekly grid |
+| `skills` | the station's own DJ segments: list, new, show, edit, rm |
+| `blocklist` | bans and rules: list, block, unblock, rm, rule add/edit |
+| `onair` | live control: tools, now, state, say, segment, skip, request, queue, sfx, jingle, list |
 
-## Quickstart
-
-```sh
-python3 scripts/subwave.py pull              # wrote instance/ (N files + ids.lock.json)
-# edit a file under instance/, or use a command from Authoring below
-python3 scripts/subwave.py validate          # result ok (N personas, N shows, N/N cells), 0 warning(s)
-python3 scripts/subwave.py apply             # dry run: N step(s) prepared, 0 requests sent
-python3 scripts/subwave.py apply --yes       # N step(s) written; ids.lock.json updated
-```
-
-`apply` prints every step before it writes, and sends nothing until `--yes`.
-
-## Commands
-
-### Reading
-
-| Command | Purpose | Example |
-| --- | --- | --- |
-| `status` | tier, station, what is on air, repo sync | `status` |
-| `pull` | capture the station into `instance/` | `pull --force` |
-| `diff` | drift vs the station; exit 1 when it differs | `diff` |
-| `validate` | check a capture before applying | `validate --dir examples/demo` |
-
-`--force` replaces a capture, `--allow-lossy` accepts a partial tier-1 one, `--dir` points elsewhere.
-
-### Writing
-
-`apply` dry-runs by default and prints each step; `--yes` performs the writes. `--force-now` writes while a
-show is on air; `--no-backup` skips the pre-apply backup and `--backup-dir` moves it. `--prune` deletes entities on the station but not in the repo; `--force-prune` allows that when something depends on them.
-
-| Command | Purpose | Example |
-| --- | --- | --- |
-| `apply` | push the capture to the station | `apply` then `apply --yes` |
-
-### Safety net
-
-| Command | Purpose | Example |
-| --- | --- | --- |
-| `backup` | config, assets and blocklist, plus a `RESTORE.md` | `backup --dir ~/backups` |
-| `restore` | put a backup back: state files, then assets | `restore <dir> --yes` |
-
-`--with-library` adds `library.db`, which is large and rebuildable, so it is skipped by default.
-
-### Authoring — local file edits, no network
-
-| Command | Purpose | Example |
-| --- | --- | --- |
-| `character init` | create the character layer | `character init --from demo` |
-| `character new-persona` / `new-show` | a persona (18 fields) or a show (26) | `character new-show <slug> --persona <persona>` |
-| `character add-to-grid [slug] --days ... --from ... --to ... [--replace] [--clear]` | fill grid cells; `--clear` empties them instead and needs no slug | `character add-to-grid <show> --days mon --from 9 --to 12` |
-| `character edit-persona` / `edit-show` | change named fields only | `character edit-persona <persona> --set warmth=8` |
-| `skills` | the DJ's own segments | `skills new late-shift`, `skills edit <slug> --brief "..."` |
-| `blocklist` | bans | `blocklist block --type artist --id <id>` |
-| `blocklist rule` | rules | `blocklist rule add --label "No opera" --field genre --value Opera` |
-
-`character init` takes `--from demo|blank` and `--force`; `add-to-grid` takes `--replace` to take over
-occupied cells; `edit-*` take `--force-value` for a value this toolkit does not know. `skills` also has
-`list`/`show`/`rm`; `blocklist` also has `list`/`unblock`/`rm`; `rule` also has `edit`.
-
-### On air — imperative, immediate
-
-| Command | Purpose | Example |
-| --- | --- | --- |
-| `onair tools` / `now` / `state` | the catalogue, what is on air, the queue and history | `onair now` |
-| `onair say` | have the DJ speak (`--raw`, `--over-track`, `--sfx`) | `onair say "Back after this." --yes` |
-| `onair segment` | run a programmed segment | `onair segment hourly --yes` |
-| `onair skip` | skip the current track (`--expect-id`, `--any-track`) | `onair skip --expect-id <id> --yes` |
-| `onair request` | request a song, then report the outcome | `onair request "something like Portishead" --yes` |
-| `onair queue` | search, then queue a result | `onair queue portishead --yes --pick 2` |
-| `onair sfx` / `onair jingle` | play one | `onair sfx airhorn --yes` |
-| `onair list` | skills, sfx or jingles | `onair list skills` |
-
-
-## Declarative vs imperative
-
-Everything except `onair` describes the station: it is captured, diffed, validated and applied
-deliberately. `onair` changes the broadcast now — it is never part of `apply` or `diff`, nothing it does
-is captured, and nothing it does enters git.
-
-## Safety model
-
-- **A lossy capture is refused** — pushing trimmed shows back would strip the fields the API hid.
-- **A payload holding a redaction placeholder is refused**, so a credential is never overwritten with it.
-- **Writing while a show is on air is refused** unless `--force-now`.
-- **A backup is mandatory before writes and before any prune** — a delete has no undo.
-- **Prune refuses anything with dependents**, and never deletes the active or last persona, or last show.
-- **Every air-changing verb needs `--yes`**; `skip` also needs `--expect-id` or `--any-track`.
-- **`validate` runs before any write, and every write is read back** — a field that did not land is named.
-
-## What it does not do
-
-- **Avatars and imaging media** — binary; `backup` covers them, authoring does not.
-- **Library operations** — tagging, playlist building, analysis. That is Navidrome's and the station's job.
-- **Anything that bypasses the station's `tool.mjs` trust boundary** — tool code stays quarantined until a
-  human reviews it and trusts its sha256.
-
-## Layout
-
-```
-instance/          your station — gitignored; character/ holds identity, personas,
-                   shows and the grid, skills/<slug>/ the station's own DJ segments
-skills/            agent procedures — how an agent works this repo
-examples/demo/     a committed fictional station, same shape as instance/
-scripts/subwave.py the whole tool
-```
+`apply` also takes `--force-now` to write while a show is on air, `--no-backup` to skip the backup, and
+`--prune` / `--force-prune` to delete things that exist on the station but not in your files.
 
 ## Where to read more
 
-`AGENTS.md` for agents · `docs/PLAN.md` design · `docs/decision-log.md` why · `docs/applied.md` what aired.
+`AGENTS.md` for agents · `docs/PLAN.md` for design · `docs/decision-log.md` for why things are the way they
+are · `docs/applied.md` for what has gone on air.

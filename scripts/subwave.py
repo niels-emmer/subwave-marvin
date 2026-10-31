@@ -1119,7 +1119,10 @@ def cmd_diff(config, args):
     print_blocklist_diff(blocklist_report)
     skills_report = {"added": [], "removed": [], "changed": [], "unchanged": []}
     if skills_root().is_dir():
-        skills_report = compare_skills(load_repo_skills(), load_live_skills(config, 1))
+        # The REAL tier, not a hardcoded 1: the API path returns the whole catalog
+        # including built-ins, which are never captured, so comparing against it
+        # reported every built-in as removed and every custom as changed.
+        skills_report = compare_skills(load_repo_skills(), load_live_skills(config, tier))
         print_skill_diff(skills_report)
     count = drift_count(report)
     count += sum(len(blocklist_report[kind][label]) for kind in ("entries", "rules")
@@ -1988,7 +1991,8 @@ def cmd_apply(config, args):
             % (capture.get("tier"), lost))
 
     # validate first: a typo'd field would be silently dropped by a shallow merge
-    report = validate_instance()
+    report = validate_instance(None, station_moods=station_mood_names(config)
+                               if tier == 2 else None)
     if report["unreadable"]:
         raise ToolError("cannot apply: instance/ is unreadable (%s). Run: subwave.py validate"
                         % "; ".join(report["unreadable"]))
@@ -2258,7 +2262,27 @@ def _duplicate_ids(documents, errors, what):
             seen[id_] = slug
 
 
-def validate_instance(root=None):
+def station_mood_names(config):
+    """The station's CURRENT mood names, or None when we cannot ask.
+
+    Moods are station-provided data (settings.moods), not a schema enum, so the
+    only honest check is against what this station actually has - and only when
+    we can read it. Genres are deliberately NOT checked: they are free-form
+    library tags resolved through a fold, so a wrong one is a curation problem,
+    not a schema error. The next person will assume genres are checkable too.
+    """
+    try:
+        settings = json.loads(read_state_file(config, "settings.json"))
+    except (ToolError, ConfigError, ValueError):
+        return None
+    moods = settings.get("moods")
+    if not isinstance(moods, list):
+        return None
+    names = {mood.get("name") for mood in moods if isinstance(mood, dict)}
+    return names or None
+
+
+def validate_instance(root=None, station_moods=None):
     """Check instance/ against the shape the server returns.
 
     Returns {"errors", "warnings", "unreadable", "counts"}. Warnings never
@@ -2287,6 +2311,13 @@ def validate_instance(root=None):
         counts["shows"] += 1
         shows[path.stem] = document
         _check_fields(path.name, document, SHOW_FIELDS, errors, warnings, "show")
+        if station_moods is not None:
+            for mood in document.get("moods") or []:
+                if mood not in station_moods:
+                    # A warning: the station simply never selects it, and a mood
+                    # it has added since this capture was taken is not our error.
+                    warnings.append("%s: mood %r is not one the station has (it has: %s)"
+                                    % (path.name, mood, ", ".join(sorted(station_moods))))
 
     _duplicate_ids(personas, errors, "persona")
     _duplicate_ids(shows, errors, "show")
@@ -2419,7 +2450,15 @@ def cmd_validate(config, args):
     # --dir lets CI validate examples/demo, the committed schema reference.
     # Without it this still validates instance/, exactly as before.
     root = Path(args.dir).expanduser() if getattr(args, "dir", None) else INSTANCE_DIR
-    result = validate_instance(root)
+    # Only tier 2 can read the station's own mood names; tier 1 says nothing
+    # rather than guessing a vocabulary. No config at all (tests, --dir only)
+    # means no station to ask.
+    moods = None
+    if config is not None:
+        tier, _ = detect_tier(config)
+        if tier == 2:
+            moods = station_mood_names(config)
+    result = validate_instance(root, station_moods=moods)
     print("validate  %s" % root)
     if result["unreadable"]:
         for line in result["unreadable"]:

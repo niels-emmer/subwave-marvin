@@ -6,15 +6,15 @@ your station, and ask in plain language — "make a new show", "why does host X 
 Agent-agnostic: the entry point is `AGENTS.md`, so Claude Code, Codex, OpenCode or any other agent picks
 up the same instructions; skills and scripts do the mechanical parts.
 
-**Two tiers, announced rather than assumed.** HTTP only: you can create and update config, but reads come
-back trimmed and a backup cannot include the schedule. With ssh to the host: full fidelity, including
-show definitions and the grid.
+**Two tiers, announced rather than assumed.** HTTP only: reads come back trimmed and a backup cannot
+include the schedule, and a capture taken that way is too lossy to apply. With ssh to the host: full
+fidelity, including show definitions and the grid — take one complete capture, then apply from it at
+either tier.
 
 ```sh
 cp .env.example .env     # base URL, admin credentials, station password
 # tier 2 only: also set SUBWAVE_HOST and SUBWAVE_STATE_DIR
 ```
 
-Point your agent here and ask for `scripts/subwave.py status` (the tool lands in P1 — see `docs/PLAN.md`).
-`instance/` is gitignored and `examples/demo/` is a fictional station, so the repo is testable without one.
+Point your agent here and run `scripts/subwave.py status`. `instance/` is gitignored and `examples/demo/` is a fictional station, so the repo is testable without one.
 `AGENTS.md` first · `docs/PLAN.md` design · `docs/decision-log.md` why · `docs/applied.md` what went on air

@@ -19,12 +19,17 @@ runs live, so a config change alters the next track and the next talk segment, n
 | | Tier 1: HTTP only | Tier 2: host access |
 | --- | --- | --- |
 | Needs | base URL + admin credentials | + ssh and `docker exec` |
-| Create / update | yes | yes |
+| Create / update | only from a complete capture | yes |
 | Read personas, shows | **trimmed** | full |
 | Read the grid | yes | yes |
 | Backup | **no schedule** | complete |
 
-Every operation says which tier it is running at. Tier 1 is portable and lossy; do not pretend otherwise.
+Every operation says which tier it is running at. Tier 1 is portable and lossy; do not pretend
+otherwise.
+
+A tier-1 `pull` is **always** lossy — the API cannot return the 14 persona or 19 show fields it hides —
+so `validate` fails and `apply` refuses. Host access is therefore needed **once**, to take a complete
+capture; after that, writing from that capture works at either tier.
 
 **Tier 1 cannot read full show definitions.** `/api/schedule` returns shows cut to 7 of 26 fields and
 there is no `GET /shows`. So `apply` must only ever send whole objects built from the repo — never
@@ -114,6 +119,7 @@ which agents otherwise never turn on.
 ```sh
 sh scripts/check-secrets.sh          # commit gate: tracked files
 sh scripts/check-secrets.sh --all    # also untracked-but-not-ignored
+python3 -m unittest discover -s tests  # offline: the mock station is in-process
 
 python3 scripts/subwave.py status    # tier, station, on-air state, repo sync
 python3 scripts/subwave.py pull      # live -> instance/, secrets redacted (--force replaces)

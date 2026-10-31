@@ -6,6 +6,7 @@ proven without touching a live station:
 
   GET  /api/health          public
   GET  /api/now-playing     public
+  GET  /api/state           public; station identity and current state
   GET  /api/personas        public; TRIMMED to 4 fields per persona
   GET  /api/schedule        public; shows TRIMMED to 7 of 26 fields
   GET  /api/settings        admin; the 19-key UI summary, NOT settings.json
@@ -108,6 +109,21 @@ class Station:
                          for p in self.settings.get("personas") or []],
             "timezone": self.settings.get("timezone"),
             "locale": self.settings.get("locale"),
+        }
+
+    def public_state(self):
+        """Station identity as /api/state exposes it."""
+        return {
+            "station": {"id": None, "name": self.settings.get("station"),
+                        "multiStation": False},
+            "timezone": self.settings.get("timezone"),
+            "locale": self.settings.get("locale"),
+            "theme": self.settings.get("theme"),
+            "privacy": self.settings.get("privacy") or {},
+            "current": None,
+            "upcoming": [],
+            "streamIdle": False,
+            "pickerBusy": False,
         }
 
     def public_personas(self):
@@ -264,6 +280,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/now-playing":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.now_playing())
+        if path == "/api/state":
+            self.station.record("GET", path, None, True)
+            return self._send(200, self.station.public_state())
         if path == "/api/personas":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_personas())
@@ -303,6 +322,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         path = urlsplit(self.path).path
         body = self._body()
+        if path == "/api/state":
+            self.station.record("GET", path, None, True)
+            return self._send(200, self.station.public_state())
         if path == "/api/personas":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_personas())

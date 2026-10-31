@@ -74,6 +74,12 @@ class ReadTests(MockTestCase):
         # the grid itself is fully readable
         self.assertEqual(sum(len(day) for day in payload["schedule"].values()), 168)
 
+    def test_state_exposes_station_identity(self):
+        status, payload = call(self.server, "/api/state", auth=False)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["station"]["name"])
+        self.assertIn("timezone", payload)
+
     def test_personas_are_trimmed_to_four_fields(self):
         status, payload = call(self.server, "/api/personas", auth=False)
         self.assertEqual(status, 200)

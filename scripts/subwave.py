@@ -573,12 +573,21 @@ def _blocklist_key(item, kind):
     return "%s:%s" % (item.get("type"), item.get("id"))
 
 
+def _wire_shape(item):
+    """Drop toolkit-only keys (slug) so the station side compares like for like."""
+    if not isinstance(item, dict):
+        return item
+    return {key: value for key, value in item.items() if key != "slug"}
+
+
 def compare_blocklist(repo, live):
     """Same added/removed/changed shape as personas and shows."""
     report = {}
     for kind in ("entries", "rules"):
-        repo_items = {_blocklist_key(item, kind): item for item in (repo.get(kind) or [])}
-        live_items = {_blocklist_key(item, kind): item for item in (live.get(kind) or [])}
+        repo_items = {_blocklist_key(item, kind): _wire_shape(item)
+                      for item in (repo.get(kind) or [])}
+        live_items = {_blocklist_key(item, kind): _wire_shape(item)
+                      for item in (live.get(kind) or [])}
         changed = sorted(key for key in set(repo_items) & set(live_items)
                          if repo_items[key] != live_items[key])
         report[kind] = {
@@ -868,6 +877,20 @@ def validate_blocklist(document, show_slugs, errors, warnings):
         if not entry.get("id"):
             errors.append("blocklist.json: entries[%d] has no id" % index)
 
+    seen_slugs = {}
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        slug = rule.get("slug")
+        if not slug:
+            errors.append("blocklist.json: rules[%d] has no slug; every rule needs one "
+                          "(it is how apply knows which station uuid to update)" % index)
+        elif slug in seen_slugs:
+            errors.append("blocklist.json: rules[%d] and rules[%d] share the slug %r"
+                          % (seen_slugs[slug], index, slug))
+        else:
+            seen_slugs[slug] = index
+
     if len(rules) > BLOCKLIST_RULES_MAX:
         errors.append("blocklist.json: %d rules, the station accepts at most %d"
                       % (len(rules), BLOCKLIST_RULES_MAX))
@@ -933,6 +956,7 @@ def cmd_pull(config, args):
     print("tier      %s" % TIER_LABEL[tier], flush=True)
 
     previous_lock = {}
+    previous_blocklist_lock = {"version": 1, "rules": {}, "ids": {}}
     if INSTANCE_DIR.exists():
         if not args.force:
             raise ToolError(
@@ -941,6 +965,8 @@ def cmd_pull(config, args):
         lock_path = INSTANCE_DIR / "ids.lock.json"
         if lock_path.is_file():
             previous_lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        if (INSTANCE_DIR / BLOCKLIST_LOCK).is_file():
+            previous_blocklist_lock = load_blocklist_lock()
         # Replace, do not merge: a stale file from an older layout would
         # otherwise sit next to the new character layer and confuse the next reader.
         shutil.rmtree(INSTANCE_DIR)
@@ -980,7 +1006,18 @@ def cmd_pull(config, args):
     # at BOTH tiers - the one entity tier 1 captures losslessly.
     lock_now = json.loads((INSTANCE_DIR / "ids.lock.json").read_text(encoding="utf-8"))
     blocklist = blocklist_to_repo(blocklist_live, lock_now)
+
+    # A rule's slug is ours; its uuid is the station's. Keep both so a re-apply
+    # updates the same rule instead of minting a near-duplicate.
+    assign_rule_slugs(blocklist["rules"], previous_blocklist_lock.get("rules") or {})
     write_json(INSTANCE_DIR / BLOCKLIST_FILE, blocklist)
+    rule_lock = {"version": 1, "rules": {}, "ids": {}}
+    for rule in blocklist["rules"]:
+        uuid = rule.get("id")
+        if uuid:
+            rule_lock["rules"][rule_slug(rule)] = uuid
+            rule_lock["ids"][uuid] = rule_slug(rule)
+    save_blocklist_lock(rule_lock)
     summary["files"] += 1
 
     print("wrote     instance/ (%d files + ids.lock.json)" % summary["files"])
@@ -1624,11 +1661,13 @@ def build_grid(model, lock):
     return {"schedule": grid, "override": override}, sorted(set(unresolved))
 
 
-def payload_hash(steps, grid_body):
+def payload_hash(steps, grid_body, blocklist=None):
+    """Everything apply writes, so a blocklist-only edit is not read as no-op."""
     blob = json.dumps(
         {"steps": [{"method": step["method"], "path": step["path"], "body": step["body"]}
                    for step in steps],
-         "grid": grid_body},
+         "grid": grid_body,
+         "blocklist": blocklist or {}},
         sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -1665,6 +1704,52 @@ def persist_new_id(step, payload, lock):
     lock.setdefault("ids", {})[new_id] = slug
     write_json(INSTANCE_DIR / "ids.lock.json", lock)
     return slug, new_id
+
+
+def apply_blocklist(config, document, lock):
+    """Entries then rules. A 409 on an entry is success: already blocked."""
+    lock = copy.deepcopy(lock)
+    lock.setdefault("rules", {})
+    lock.setdefault("ids", {})
+
+    for entry in document.get("entries") or []:
+        status, _ = http_json(config, "/api/library/blocklist", admin=True, method="POST",
+                              body=blocklist_wire_entry(entry))
+        label = "%s %s" % (entry.get("type"), entry.get("id"))
+        if status == 409:
+            print("blocked   %s (already blocked)" % label)
+        elif status >= 400:
+            raise ToolError("POST /api/library/blocklist failed for %s: HTTP %s"
+                            % (label, status))
+        else:
+            print("blocked   %s" % label)
+
+    for rule in document.get("rules") or []:
+        slug = rule_slug(rule)
+        uuid = lock["rules"].get(slug)
+        body = blocklist_wire_rule(rule)
+        if uuid:
+            status, payload = http_json(
+                config, "/api/library/blocklist/rules/%s" % uuid, admin=True,
+                method="PUT", body=body)
+            verb = "updated"
+        else:
+            status, payload = http_json(
+                config, "/api/library/blocklist/rules", admin=True, method="POST", body=body)
+            verb = "added"
+        if status >= 400:
+            raise ToolError("%s rule %r failed: HTTP %s"
+                            % (verb, slug, status))
+        minted = (payload or {}).get("id")
+        if minted and minted != uuid:
+            lock["rules"][slug] = minted
+            lock["ids"][minted] = slug
+            rule["id"] = minted
+        print("rule      %s %s" % (verb, slug))
+
+    save_blocklist_lock(lock)
+    save_repo_blocklist(document)
+    return lock
 
 
 def cmd_apply(config, args):
@@ -1750,7 +1835,9 @@ def cmd_apply(config, args):
             "schedule or the full show definitions, so this write would be unprotected. Pass "
             "--no-backup to accept that explicitly.")
 
-    digest = payload_hash(steps, grid_body)
+    repo_blocklist = load_repo_blocklist()
+    blocklist_lock = load_blocklist_lock()
+    digest = payload_hash(steps, grid_body, repo_blocklist)
     applied = lock.get("applied") or {}
     if applied.get("hash") == digest:
         print("result    no changes since the last apply (%s)" % applied.get("at"))
@@ -1775,11 +1862,18 @@ def cmd_apply(config, args):
                                    "body": grid_body, "label": "grid"})
     print("wrote     PUT %-14s %-28s -> HTTP %s" % ("/api/schedule", "grid", status))
 
+    # Blocklist last, and it never deletes. A rule removed locally is reported
+    # and left alone: deletes are their own task.
+    for slug in pending_removals(repo_blocklist, blocklist_lock):
+        print("pending   rule %r is in the lock but not in the file; apply does not delete "
+              "(that is the deletes task)" % slug)
+    apply_blocklist(config, repo_blocklist, blocklist_lock)
+
     # The writes succeeded, so record that before anything else can fail: a
     # verification that throws must not erase the fact that the station changed.
     lock["applied"] = {
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "hash": payload_hash(build_steps(model, lock), grid_body),
+        "hash": payload_hash(build_steps(model, lock), grid_body, load_repo_blocklist()),
         "tier": tier,
     }
     write_json(lock_path, lock)
@@ -2000,6 +2094,21 @@ def validate_instance(root=None):
         blocklist = _load_json(blocklist_path, unreadable)
         if blocklist is not None:
             validate_blocklist(blocklist, set(shows), errors, warnings)
+
+            lock_path = root / BLOCKLIST_LOCK
+            blocklist_lock = _load_json(lock_path, unreadable) if lock_path.is_file() else None
+            if isinstance(blocklist_lock, dict):
+                uuids = blocklist_lock.get("rules") or {}
+                seen_uuids = {}
+                for slug, uuid in sorted(uuids.items()):
+                    if uuid in seen_uuids:
+                        errors.append("blocklist.lock.json: %r and %r share the uuid %r"
+                                      % (seen_uuids[uuid], slug, uuid))
+                    seen_uuids[uuid] = slug
+                for slug in pending_removals(blocklist, blocklist_lock):
+                    warnings.append("blocklist.lock.json: rule %r is in the lock but not in "
+                                    "the file - a pending removal, which apply will not act on"
+                                    % slug)
 
     if isinstance(lock, dict):
         lock_personas = lock.get("personas") or {}
@@ -2366,6 +2475,82 @@ def edit_entity(root, kind, args):
           % (document.get("id") or "(none)", args.slug, len(document) - len(changes)))
     print("next      subwave.py validate && subwave.py apply --dry-run")
     return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# blocklist authoring: slugs the toolkit owns, uuids the station mints
+#
+# A rule's id is a server-minted uuid and there is no slug on the station. If we
+# re-applied without a lock, every apply would mint a NEW uuid for the same rule,
+# filling RULES_MAX=50 with near-duplicates that each block a slightly different
+# subset - while matchCount still looked plausible. That is the trap this lock
+# exists to prevent.
+# --------------------------------------------------------------------------
+
+BLOCKLIST_LOCK = "blocklist.lock.json"
+
+
+def load_blocklist_lock(root=None):
+    path = Path(root or INSTANCE_DIR) / BLOCKLIST_LOCK
+    if not path.is_file():
+        return {"version": 1, "rules": {}, "ids": {}}
+    try:
+        lock = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ToolError("%s is not valid JSON (%s)" % (path, exc))
+    lock.setdefault("version", 1)
+    lock.setdefault("rules", {})
+    lock.setdefault("ids", {})
+    return lock
+
+
+def save_blocklist_lock(lock, root=None):
+    write_json(Path(root or INSTANCE_DIR) / BLOCKLIST_LOCK, lock)
+
+
+def assign_rule_slugs(rules, lock_rules):
+    """Give every rule a slug, stable by uuid. Mutates and returns the rules."""
+    by_uuid = {uuid: slug for slug, uuid in lock_rules.items()}
+    used = set(lock_rules)
+    for rule in rules:
+        uuid = rule.get("id")
+        slug = None
+        if uuid and uuid in by_uuid:
+            slug = by_uuid[uuid]
+        elif rule.get("slug"):
+            slug = rule["slug"]
+        if not slug:
+            base = slugify(rule.get("label") or "rule")
+            slug = base
+            suffix = 2
+            while slug in used:
+                slug = "%s-%d" % (base, suffix)
+                suffix += 1
+        rule["slug"] = slug
+        used.add(slug)
+    return rules
+
+
+def rule_slug(rule):
+    return rule.get("slug") or slugify(rule.get("label") or "rule")
+
+
+def blocklist_wire_rule(rule):
+    """The rule as the station accepts it: no slug, no minted fields."""
+    body = {key: copy.deepcopy(rule[key])
+            for key in ("label", "field", "values", "season", "showIds") if key in rule}
+    return body
+
+
+def blocklist_wire_entry(entry):
+    return {key: copy.deepcopy(entry[key])
+            for key in ("type", "id", "name", "artist", "album") if key in entry}
+
+
+def pending_removals(blocklist, lock):
+    """Rules the lock knows but the file no longer has: reported, never deleted."""
+    present = {rule_slug(rule) for rule in (blocklist.get("rules") or [])}
+    return sorted(slug for slug in (lock.get("rules") or {}) if slug not in present)
 
 
 def cmd_character(config, args):
@@ -2746,6 +2931,168 @@ def _rollback(state, snapshot, written):
                 pass
 
 
+# --------------------------------------------------------------------------
+# blocklist commands: local file edits, like `character`
+# --------------------------------------------------------------------------
+
+def save_repo_blocklist(document, root=None):
+    write_json(Path(root or INSTANCE_DIR) / BLOCKLIST_FILE, document)
+
+
+def _parse_season(from_text, to_text):
+    def one(text):
+        month, _, day = text.partition("-")
+        try:
+            return {"month": int(month), "day": int(day)}
+        except ValueError:
+            raise ToolError("season dates are MM-DD (got %r)" % text)
+    if not from_text and not to_text:
+        return None
+    if not (from_text and to_text):
+        raise ToolError("--season-from and --season-to go together")
+    return {"from": one(from_text), "to": one(to_text)}
+
+
+def _rule_from_args(args, existing=None):
+    rule = copy.deepcopy(existing) if existing else {}
+    if args.label is not None:
+        rule["label"] = args.label
+    if args.field is not None:
+        rule["field"] = args.field
+    if args.value:
+        rule["values"] = list(args.value)
+    if args.season_from or args.season_to:
+        rule["season"] = _parse_season(args.season_from, args.season_to)
+    if args.show is not None:
+        rule["showIds"] = list(args.show)
+    rule.setdefault("season", None)
+    rule.setdefault("showIds", [])
+    return rule
+
+
+def _check_rule(rule, root, label="rule"):
+    errors, warnings = [], []
+    document = {"entries": [], "rules": [rule]}
+    validate_blocklist(document, set(_slugs(root, "shows")), errors, warnings)
+    if errors:
+        raise ToolError("%s: %s" % (label, errors[0]))
+
+
+def cmd_blocklist(config, args):
+    """Authoring is local only: this never touches the network."""
+    root = INSTANCE_DIR
+    if not (root / "character").is_dir() and not (root / BLOCKLIST_FILE).is_file():
+        raise ToolError("no instance/ to author (run: subwave.py pull, or character init)")
+    document = load_repo_blocklist(root)
+    action = args.blocklist_command
+
+    if action == "list":
+        for entry in document["entries"]:
+            print("entry     %-6s %s  %s" % (entry.get("type"), entry.get("id"),
+                                             entry.get("name") or ""))
+        if not document["entries"]:
+            print("entry     (none)")
+        for rule in document["rules"]:
+            season = rule.get("season")
+            window = ""
+            if isinstance(season, dict):
+                window = "  season %02d-%02d..%02d-%02d" % (
+                    season.get("from", {}).get("month", 0),
+                    season.get("from", {}).get("day", 0),
+                    season.get("to", {}).get("month", 0),
+                    season.get("to", {}).get("day", 0))
+            shows = rule.get("showIds") or []
+            print("rule      %-24s %-9s %s%s%s" % (
+                rule_slug(rule), rule.get("field"),
+                ", ".join(rule.get("values") or []), window,
+                "  shows: " + ", ".join(shows) if shows else ""))
+        if not document["rules"]:
+            print("rule      (none)")
+        return EXIT_OK
+
+    if action == "block":
+        existing = [entry for entry in document["entries"]
+                    if entry.get("type") == args.type and entry.get("id") == args.id]
+        if existing:
+            raise ToolError("%s %s is already blocked" % (args.type, args.id))
+        entry = {"type": args.type, "id": args.id}
+        for key in ("name", "artist", "album"):
+            value = getattr(args, key)
+            if value:
+                entry[key] = value
+        document["entries"].append(entry)
+        save_repo_blocklist(document, root)
+        print("blocked   %s %s" % (args.type, args.id))
+        return EXIT_OK
+
+    if action == "unblock":
+        before = len(document["entries"])
+        document["entries"] = [entry for entry in document["entries"]
+                               if not (entry.get("type") == args.type
+                                       and entry.get("id") == args.id)]
+        if len(document["entries"]) == before:
+            raise ToolError("%s %s is not blocked" % (args.type, args.id))
+        save_repo_blocklist(document, root)
+        print("unblocked %s %s" % (args.type, args.id))
+        print("note      apply does not delete on the station; this is a local removal")
+        return EXIT_OK
+
+    if action == "rm":
+        before = len(document["rules"])
+        document["rules"] = [rule for rule in document["rules"]
+                             if rule_slug(rule) != args.slug]
+        if len(document["rules"]) == before:
+            raise ToolError("no rule %r" % args.slug)
+        save_repo_blocklist(document, root)
+        print("removed   rule %s (locally)" % args.slug)
+        print("note      apply will report it as a pending removal and will not delete it")
+        return EXIT_OK
+
+    raise ToolError("unknown blocklist command %r" % action)
+
+
+def cmd_blocklist_rule(config, args):
+    root = INSTANCE_DIR
+    document = load_repo_blocklist(root)
+    action = args.rule_command
+
+    if action == "add":
+        rule = _rule_from_args(args)
+        for required in ("label", "field", "values"):
+            if not rule.get(required):
+                raise ToolError("--%s is required" % ("value" if required == "values" else required))
+        lock_rules = load_blocklist_lock(root).get("rules") or {}
+        used = {rule_slug(existing) for existing in document["rules"]} | set(lock_rules)
+        base = slugify(rule["label"])
+        slug = base
+        suffix = 2
+        while slug in used:
+            slug = "%s-%d" % (base, suffix)
+            suffix += 1
+        rule["slug"] = slug
+        _check_rule(rule, root)
+        document["rules"].append(rule)
+        save_repo_blocklist(document, root)
+        print("rule      added %s (%s: %s)" % (slug, rule["field"], ", ".join(rule["values"])))
+        return EXIT_OK
+
+    if action == "edit":
+        match = next((rule for rule in document["rules"]
+                      if rule_slug(rule) == args.slug), None)
+        if match is None:
+            raise ToolError("no rule %r; known: %s" % (args.slug, ", ".join(
+                rule_slug(rule) for rule in document["rules"]) or "none"))
+        updated = _rule_from_args(args, existing=match)
+        updated["slug"] = args.slug
+        _check_rule(updated, root)
+        document["rules"][document["rules"].index(match)] = updated
+        save_repo_blocklist(document, root)
+        print("rule      edited %s" % args.slug)
+        return EXIT_OK
+
+    raise ToolError("unknown rule command %r" % action)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="subwave.py",
@@ -2764,6 +3111,48 @@ def build_parser():
 
     diff = sub.add_parser("diff", help="read-only drift report")
     diff.set_defaults(func=cmd_diff)
+
+    blocklist = sub.add_parser("blocklist", help="author the blocklist locally (no network)")
+    bl_sub = blocklist.add_subparsers(dest="blocklist_command", required=True)
+
+    bl_list = bl_sub.add_parser("list", help="entries and rules")
+    bl_list.set_defaults(func=cmd_blocklist)
+
+    bl_block = bl_sub.add_parser("block", help="block a track, album or artist")
+    bl_block.add_argument("--type", required=True, choices=("artist", "album", "track"))
+    bl_block.add_argument("--id", required=True, help="the Navidrome id")
+    bl_block.add_argument("--name")
+    bl_block.add_argument("--artist")
+    bl_block.add_argument("--album")
+    bl_block.set_defaults(func=cmd_blocklist)
+
+    bl_unblock = bl_sub.add_parser("unblock", help="remove a block locally")
+    bl_unblock.add_argument("--type", required=True, choices=("artist", "album", "track"))
+    bl_unblock.add_argument("--id", required=True)
+    bl_unblock.set_defaults(func=cmd_blocklist)
+
+    bl_rm = bl_sub.add_parser("rm", help="remove a rule locally")
+    bl_rm.add_argument("slug")
+    bl_rm.set_defaults(func=cmd_blocklist)
+
+    bl_rule = bl_sub.add_parser("rule", help="add or edit a rule")
+    rule_sub = bl_rule.add_subparsers(dest="rule_command", required=True)
+    for name, help_text in (("add", "add a rule"), ("edit", "edit a rule by slug")):
+        # NB: do not call this `parser` - build_parser returns the name `parser`,
+        # and rebinding it made --help print this leaf and broke the whole CLI.
+        rule_parser = rule_sub.add_parser(name, help=help_text)
+        if name == "edit":
+            rule_parser.add_argument("slug")
+        rule_parser.add_argument("--label")
+        rule_parser.add_argument("--field", choices=BLOCKLIST_RULE_FIELDS)
+        rule_parser.add_argument("--value", action="append", default=[],
+                                 help="one value; repeat up to 12")
+        rule_parser.add_argument("--season-from",
+                                 help="MM-DD; while in season the rule does NOT block")
+        rule_parser.add_argument("--season-to", help="MM-DD; from > to wraps the year end")
+        rule_parser.add_argument("--show", action="append", default=None,
+                                 help="show slug; omit for station-wide")
+        rule_parser.set_defaults(func=cmd_blocklist_rule)
 
     character = sub.add_parser("character", help="author the character layer locally (no network)")
     char_sub = character.add_subparsers(dest="character_command", required=True)

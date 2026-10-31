@@ -117,7 +117,9 @@ scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE
 - **Blocklist capture** covers the third config document (`${STATE_DIR}/blocklist.json`): bans and rules,
   read over admin HTTP at both tiers, validated against the field enum and limits, compared by `diff`,
   carried by `backup` (the station's own zip omits it) and put back by `restore`. Authoring and `apply`
-  are deliberately not part of it.
+  Authoring (`blocklist block|unblock|rm|rule`) edits the repo only; `apply` writes entries and rules
+  after the grid, treats a 409 "already blocked" as success, and never deletes. Rule identity is a
+  toolkit-owned slug locked to the station's uuid, so a re-apply updates rather than duplicates.
 - **`restore`** is the other half of `backup`: dry run by default, state files first then assets,
   refuses a backup that is incomplete or whose grid does not resolve, refuses while on air unless
   `--force-now`, verifies the written station and rolls back to the previous state if it does not

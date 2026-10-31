@@ -55,16 +55,27 @@ already exists.
 
 ## 5. Protect `main`, requiring CI
 
-Settings → Branches → rule on `main`: require a pull request, require the `secrets` check from
-`.github/workflows/ci.yml`, and block force pushes.
+Settings → Branches → rule on `main`: require a pull request, require all three checks from
+`.github/workflows/ci.yml` — `secrets`, `tests`, `demo` — and block force pushes.
 
-**Why:** that workflow currently has exactly one job, `secrets`. An unprotected `main` lets a direct push
-skip it, which makes "CI is green" mean nothing to a visitor reading the repo.
+**Why:** an unprotected `main` lets a direct push skip those jobs, which makes "CI is green" mean
+nothing to a visitor reading the repo. Require all three, not just `secrets`: a regression in
+`tests` or in the committed demo is exactly what this repo's CI exists to catch.
+
+**This one needs the flip first.** On a free plan, rulesets and branch protection return
+`403 Upgrade to GitHub Pro or make this repository public` while the repo is private. Do item 9,
+then this one, then secret scanning (item 4).
 
 ## 6. Decide: fictional demo cast, or a screenshot
 
 `examples/demo/` is a committed fictional station in the same shape a real `instance/` has. Decide whether
 that carries the README or whether you want a screenshot as well.
+
+**Decided: the demo cast carries it, no screenshot.** This toolkit has no interface of its own — it is a
+CLI and a set of agent procedures — so there is nothing to capture but the station's admin console, whose
+UI belongs to a different project and whose pixels are the easiest way to publish a hostname by accident.
+`examples/demo/` already shows the shape a real station has, and the README's sample session shows the
+interaction, which is the part a screenshot cannot.
 
 **Why:** a cold reader needs to see what a station looks like and prose alone under-sells it. But a
 screenshot is the easiest way to publish a hostname, an IP or a real host name by accident. If you take
@@ -81,7 +92,9 @@ references to a companion repo that will not be public. Then confirm every comma
 python3 scripts/subwave.py --help
 ```
 
-The commands are `status`, `pull`, `diff`, `apply`, `backup`; there is no `validate`.
+The commands are `status`, `pull`, `diff`, `validate`, `apply`, `backup`, `restore`,
+`character`, `blocklist`, `skills` and `onair` — the README appendix lists all eleven with their
+flags, and `--help` is the authority.
 
 **Why:** private-repo habits are invisible to the author and are the first thing a visitor trips over —
 a link to a file that was never committed, or a clone command for a different remote.
@@ -99,6 +112,22 @@ audience it is written for.
 Do 1–8, then make the repository public.
 
 **Why:** 1–3 cannot be undone after the switch, and 4–5 protect nothing until the code is actually out.
+
+## Author identity in the history
+
+Two things in the commit history are visible the moment the repo goes public, and both are cheap
+to fix now and awkward to fix later:
+
+- The **root commit** (`7e7f66d`) is authored `Agent Orchestrator <ao@example.com>` — a
+  placeholder. `git log` shows it to anyone who looks.
+- Most commits carry `Niels Emmer <n.emmer@teamrockstars.nl>`, a work address, alongside
+  `niels <80741632+niels-emmer@users.noreply.github.com>`.
+
+Neither leaks a credential, so neither blocks the flip. Fixing either means rewriting every
+commit (`git filter-repo`), which invalidates the 21 merged PRs that point at the old SHAs and
+every existing clone. **Decide deliberately**: publish as-is and accept the placeholder on the
+root commit, or rewrite before the flip and accept that the PR history becomes dangling. Do not
+rewrite afterwards.
 
 ## The local guard is not the control
 

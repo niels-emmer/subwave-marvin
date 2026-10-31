@@ -12,6 +12,13 @@ import urllib.error
 import urllib.request
 import zipfile
 
+import sys
+from pathlib import Path
+
+# Both invocation styles must work: `discover -s tests` puts this directory on
+# sys.path, a dotted `unittest tests.test_smoke` does not.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import mock_station
 
 

@@ -8,9 +8,14 @@ import contextlib
 import io
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+# Both invocation styles must work: `discover -s tests` puts this directory on
+# sys.path, a dotted `unittest tests.test_validate` does not.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_subwave import load_tool
 

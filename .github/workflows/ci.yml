@@ -22,5 +22,3 @@ jobs:
 # Tests must never require a live station. The suite runs offline: no network,
 # no ssh, and the mock station (tests/mock_station.py) is started in-process on
 # loopback. If a test needs a real station, it belongs behind a flag, not here.
-#
-# Config-validation job arrives with the tool in Phase 1.

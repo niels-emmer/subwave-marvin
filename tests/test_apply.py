@@ -10,7 +10,13 @@ import json
 import shutil
 import tempfile
 import unittest
+
+import sys
 from pathlib import Path
+
+# Both invocation styles must work: `discover -s tests` puts this directory on
+# sys.path, a dotted `unittest tests.test_smoke` does not.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import mock_station
 from test_subwave import load_tool

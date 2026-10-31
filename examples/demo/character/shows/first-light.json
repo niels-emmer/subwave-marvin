@@ -1,8 +1,8 @@
 {
-  "id": "s_demo-first",
+  "id": "s_demo_first",
   "name": "First Light",
   "topic": "The town waking up: bright soul and pop, short links, no lingering before seven.",
-  "personaId": "p_demo-ivo",
+  "personaId": "p_demo_ivo",
   "guestPersonaIds": [],
   "banter": false,
   "pauseTalk": true,

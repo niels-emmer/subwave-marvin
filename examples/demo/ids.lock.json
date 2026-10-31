@@ -1,20 +1,20 @@
 {
   "version": 1,
   "personas": {
-    "ivo-marsh": "p_demo-ivo",
-    "nell-harrow": "p_demo-nell"
+    "ivo-marsh": "p_demo_ivo",
+    "nell-harrow": "p_demo_nell"
   },
   "shows": {
-    "first-light": "s_demo-first",
-    "late-harbour": "s_demo-late"
+    "first-light": "s_demo_first",
+    "late-harbour": "s_demo_late"
   },
   "ids": {
-    "p_demo-ivo": "ivo-marsh",
-    "p_demo-nell": "nell-harrow",
-    "s_demo-first": "first-light",
-    "s_demo-late": "late-harbour"
+    "p_demo_ivo": "ivo-marsh",
+    "p_demo_nell": "nell-harrow",
+    "s_demo_first": "first-light",
+    "s_demo_late": "late-harbour"
   },
-  "activePersonaId": "p_demo-ivo",
+  "activePersonaId": "p_demo_nell",
   "capture": {
     "tier": 2,
     "at": "2026-10-31T00:00:00Z",

@@ -33,6 +33,11 @@ DEFAULT_CONTAINER = "sub-wave-controller"
 DEFAULT_TIMEOUT = 20
 SENTINEL = "__REDACTED__"
 
+# The station's own id contract (controller/src/routes/public.ts mirrors
+# settings.ID_RE): lowercase alphanumerics and underscores, 3-32 chars. No
+# dashes. A scaffolded id must satisfy this or the station rejects or normalises it.
+ID_RE = re.compile(r"^[a-z0-9_]{3,32}$")
+
 EXIT_OK = 0
 EXIT_DRIFT = 1
 EXIT_ERROR = 1
@@ -1137,10 +1142,8 @@ SHOW_FIELDS = frozenset((
 
 CHARACTER_REQUIRED = ("name", "description", "locale", "timezone", "theme", "houseRules")
 
-ID_PATTERNS = {
-    "persona": re.compile(r"^p_[A-Za-z0-9_-]+$"),
-    "show": re.compile(r"^s_[A-Za-z0-9_-]+$"),
-}
+# One contract for every id, taken from the station: no dashes, 3-32 chars.
+ID_PATTERNS = {"persona": ID_RE, "show": ID_RE}
 
 
 def _load_json(path, unreadable):
@@ -1276,8 +1279,9 @@ def validate_instance(root=None):
         for kind, mapping in (("persona", lock_personas), ("show", lock_shows)):
             for slug, id_ in sorted(mapping.items()):
                 if not isinstance(id_, str) or not ID_PATTERNS[kind].match(id_):
-                    errors.append("ids.lock.json: %s %r has a malformed id %r"
-                                  % (kind, slug, id_))
+                    errors.append("%s/%s.json: id %r violates the station's ID_RE "
+                                  "(^[a-z0-9_]{3,32}$, no dashes)"
+                                  % (kind + "s", slug, id_))
                     continue
                 if id_ in seen:
                     errors.append("ids.lock.json: id %r is used by both %r and %r"
@@ -1344,14 +1348,20 @@ def cmd_validate(config, args):
 DAY_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
 
 # A scaffolded entity gets a placeholder id so the lockfile can hold it before
-# the station has ever seen it. Shows have theirs stripped on the wire so the
-# station assigns a real one; personas are sent whole (the station stores the
-# array as given, so an id it has never seen simply becomes the id).
-PLACEHOLDER = {"persona": "p_local-", "show": "s_local-"}
+# the station has ever seen it. Shows have theirs dropped on the wire so the
+# station assigns a real one; personas are sent inside the settings array, which
+# the station stores as given, so their id is preserved.
+PLACEHOLDER_PREFIX = {"persona": "p_local_", "show": "s_local_"}
+
+
+def placeholder_id(kind, slug):
+    """Deterministic, and valid under ID_RE: no dashes, max 32 chars."""
+    body = re.sub(r"[^a-z0-9]+", "_", slug.lower()).strip("_")
+    return (PLACEHOLDER_PREFIX[kind] + body)[:32].rstrip("_")
 
 
 def is_placeholder(id_, kind):
-    return isinstance(id_, str) and id_.startswith(PLACEHOLDER[kind])
+    return isinstance(id_, str) and id_.startswith(PLACEHOLDER_PREFIX[kind])
 
 
 def title_from_slug(slug):
@@ -1361,7 +1371,7 @@ def title_from_slug(slug):
 def persona_defaults(slug, name=None):
     """All 18 fields, at values that pass validate with no warnings."""
     return {
-        "id": PLACEHOLDER["persona"] + slug,
+        "id": placeholder_id("persona", slug),
         "name": name or title_from_slug(slug),
         "tagline": "",
         "frequency": "moderate",
@@ -1388,7 +1398,7 @@ def persona_defaults(slug, name=None):
 def show_defaults(slug, name=None, persona_id=""):
     """All 26 fields, at values that pass validate with no warnings."""
     return {
-        "id": PLACEHOLDER["show"] + slug,
+        "id": placeholder_id("show", slug),
         "name": name or title_from_slug(slug),
         "topic": "TODO: the brief for this show, in one or two sentences.",
         "personaId": persona_id,
@@ -1503,7 +1513,8 @@ def cmd_character(config, args):
         lock.setdefault("ids", {})[persona["id"]] = slug
         _save_lock(root, lock)
         print("persona   %s -> %s" % (slug, persona["id"]))
-        print("note      id is a placeholder; it is sent whole, so the station adopts it")
+        print("note      placeholder id: personas are sent inside the settings array, which the "
+              "station stores as given, so this id is preserved")
         print("next      fill in soul, then: subwave.py validate")
         return EXIT_OK
 
@@ -1530,6 +1541,8 @@ def cmd_character(config, args):
         lock.setdefault("ids", {})[show["id"]] = slug
         _save_lock(root, lock)
         print("show      %s -> %s (host %s)" % (slug, show["id"], persona_slug))
+        print("note      placeholder id: it is dropped on apply, and POST /api/shows assigns a "
+              "real one")
         print("note      no grid entry yet; use: character add-to-grid %s --days ..." % slug)
         print("next      fill in topic/genres/moods, then: subwave.py validate")
         return EXIT_OK

@@ -114,6 +114,16 @@ class PersonaScaffoldTests(CharacterTestCase):
         self.assertIn("VOICE", persona["soul"])
         self.assertIn("CATCHPHRASES", persona["soul"])
 
+    def test_scaffolded_ids_satisfy_the_station_id_re(self):
+        # The station's ID_RE forbids dashes; a dashed slug must still produce a
+        # legal id, or the station rejects or normalises it on apply.
+        code, output = self.run_cli("character", "new-persona", "dora-quint")
+        self.assertEqual(code, 0, output)
+        persona = json.loads((self.root() / "character" / "personas" / "dora-quint.json").read_text())
+        self.assertEqual(persona["id"], "p_local_dora_quint")
+        self.assertRegex(persona["id"], subwave.ID_RE)
+        self.assertNotIn("-", persona["id"])
+
     def test_new_persona_refuses_a_duplicate_slug(self):
         self.run_cli("character", "new-persona", "dj-mira")
         code, output = self.run_cli("character", "new-persona", "dj-mira")
@@ -149,6 +159,13 @@ class ShowScaffoldTests(CharacterTestCase):
         self.assertEqual(show["playlistIds"], [])
         lock = json.loads((self.root() / "ids.lock.json").read_text())
         self.assertEqual(show["personaId"], lock["personas"]["dj-mira"])
+
+    def test_scaffolded_show_id_satisfies_the_station_id_re(self):
+        code, output = self.run_cli("character", "new-show", "late-harbour-two", "--persona", "dj-mira")
+        self.assertEqual(code, 0, output)
+        show = json.loads((self.root() / "character" / "shows" / "late-harbour-two.json").read_text())
+        self.assertEqual(show["id"], "s_local_late_harbour_two")
+        self.assertRegex(show["id"], subwave.ID_RE)
 
     def test_new_show_needs_a_persona_when_several_exist(self):
         code, output = self.run_cli("character", "new-show", "no-host")
@@ -236,14 +253,14 @@ class RoundTripTests(CharacterTestCase):
         self.run_cli("character", "new-show", "harbour-mornings", "--persona", "dj-mira")
 
         path = self.root() / "character" / "shows" / "harbour-mornings.json"
-        self.assertTrue(json.loads(path.read_text())["id"].startswith("s_local-"))
+        self.assertTrue(json.loads(path.read_text())["id"].startswith("s_local_"))
 
         code, output = self.run_cli("apply", "--yes", "--force-now", "--no-backup")
         self.assertEqual(code, 0, output)
 
         assigned = json.loads(path.read_text())["id"]
         self.assertTrue(assigned.startswith("s_"))
-        self.assertFalse(assigned.startswith("s_local-"), "the station must assign a real id")
+        self.assertFalse(assigned.startswith("s_local_"), "the station must assign a real id")
         lock = json.loads((self.root() / "ids.lock.json").read_text())
         self.assertEqual(lock["shows"]["harbour-mornings"], assigned)
 

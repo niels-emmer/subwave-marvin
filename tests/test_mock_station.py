@@ -173,6 +173,23 @@ class ShowUpsertTests(MockTestCase):
         self.assertEqual(status, 409)
         self.assertIn("limit", payload)
 
+    def test_show_id_with_a_dash_is_rejected(self):
+        status, payload = call(self.server, "/api/shows", "POST",
+                               {"show": {"id": "s_bad-id", "name": "Bad"}})
+        self.assertEqual(status, 400, "the station's ID_RE forbids dashes")
+        self.assertIn("invalid show id", payload["error"])
+
+    def test_persona_id_with_a_dash_is_rejected(self):
+        status, payload = call(self.server, "/api/settings", "POST",
+                               {"personas": [{"id": "p_bad-id", "name": "Bad"}]})
+        self.assertEqual(status, 400)
+        self.assertIn("invalid persona id", payload["error"])
+
+    def test_valid_ids_are_accepted(self):
+        status, _ = call(self.server, "/api/shows", "POST",
+                         {"show": {"id": "s_ok_123", "name": "Fine"}})
+        self.assertEqual(status, 200)
+
     def test_shows_require_auth(self):
         status, _ = call(self.server, "/api/shows", "POST", {"show": {"name": "x"}}, auth=False)
         self.assertEqual(status, 401)

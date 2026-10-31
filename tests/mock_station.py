@@ -37,6 +37,7 @@ import base64
 import copy
 import io
 import json
+import re
 import threading
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,11 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "station.json"
+
+# Mirrors settings.ID_RE in the station (and the persona-avatar route): no
+# dashes, 3-32 chars. The mock enforces it so a bad id fails in tests instead
+# of on a live station.
+ID_RE = re.compile(r"^[a-z0-9_]{3,32}$")
 
 # What /api/schedule exposes per show. The other 19 fields are not readable
 # over HTTP, which is exactly why read-modify-write would destroy them.
@@ -182,6 +188,12 @@ class Station:
     # -- writes ------------------------------------------------------------
     def merge_settings(self, body):
         """Shallow merge: each top-level key replaces the existing value."""
+        personas = body.get("personas")
+        if isinstance(personas, list):
+            for persona in personas:
+                id_ = persona.get("id") if isinstance(persona, dict) else None
+                if id_ is not None and not ID_RE.match(str(id_)):
+                    return 400, {"error": "invalid persona id", "id": id_}
         for key, value in body.items():
             self.settings[key] = copy.deepcopy(value)
         return 200, {"ok": True, "keys": sorted(body)}
@@ -192,6 +204,8 @@ class Station:
         shows = self.schedule.setdefault("shows", [])
         show = copy.deepcopy(show)
         show_id = show.get("id")
+        if show_id and not ID_RE.match(str(show_id)):
+            return 400, {"error": "invalid show id", "id": show_id}
         if show_id:
             for index, existing in enumerate(shows):
                 if existing.get("id") == show_id:

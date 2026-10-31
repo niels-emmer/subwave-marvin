@@ -152,12 +152,27 @@ class LockTests(ValidateTestCase):
         self.assertIn("late-harbour", output)
         self.assertIn("no lock entry", output)
 
-    def test_malformed_id_is_an_error(self):
+    def test_an_id_with_a_dash_is_an_error(self):
+        # The station's ID_RE forbids dashes; both places must agree so the
+        # mismatch check does not fire first and hide the real problem.
         self.edit("ids.lock.json",
-                  mutate=lambda d: d["shows"].__setitem__("late-harbour", "banana"))
+                  mutate=lambda d: d["shows"].__setitem__("late-harbour", "bad-id"))
+        self.edit("character", "shows", "late-harbour.json",
+                  mutate=lambda d: d.__setitem__("id", "bad-id"))
         code, output = self.run_validate()
         self.assertEqual(code, 1)
-        self.assertIn("malformed", output)
+        self.assertIn("bad-id", output)
+        self.assertIn("ID_RE", output)
+        self.assertIn("late-harbour.json", output)
+
+    def test_a_too_short_id_is_an_error(self):
+        self.edit("ids.lock.json",
+                  mutate=lambda d: d["shows"].__setitem__("late-harbour", "ab"))
+        self.edit("character", "shows", "late-harbour.json",
+                  mutate=lambda d: d.__setitem__("id", "ab"))
+        code, output = self.run_validate()
+        self.assertEqual(code, 1)
+        self.assertIn("ID_RE", output)
 
     def test_duplicate_ids_are_an_error(self):
         def mutate(document):

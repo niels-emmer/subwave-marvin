@@ -1,8 +1,8 @@
 {
-  "id": "s_demo-late",
+  "id": "s_demo_late",
   "name": "Late Harbour",
   "topic": "Records for the hours when the town is asleep: slow soul, ambient, and jazz that does not hurry.",
-  "personaId": "p_demo-nell",
+  "personaId": "p_demo_nell",
   "guestPersonaIds": [],
   "banter": false,
   "pauseTalk": true,

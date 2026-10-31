@@ -99,6 +99,8 @@ scripts/subwave.py pull [--check]    # live -> instance/ (secrets redacted)
 scripts/subwave.py diff              # read-only drift report
 scripts/subwave.py apply [--dry-run] # repo -> live, whole objects only
 scripts/subwave.py backup <dir>      # tier 2 includes schedule.json; tier 1 refuses
+scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE
+                                     # local: change named fields only, id and slug immutable
 ```
 
 - **`pull`** reads `settings.json` + `schedule.json` from the host (tier 2) or the trimmed API (tier 1,

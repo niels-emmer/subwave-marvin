@@ -16,10 +16,8 @@ change alters the next track and the next talk segment, not some offline artifac
 ## Live system (verified 2026-10-31)
 
 - ssh alias `homeserver` (192.168.101.252, user `zaph0d`). Containers: `sub-wave-{web,controller,broadcast,caddy,analyzer,docker-proxy}` plus `navidrome`.
-- Compose dir `/home/zaph0d/macjuu/stacks/subwave` (`compose.yaml` + `.env`) is **untracked** in
-  `macjuu-private`, so the deployment is not reproducible from git.
-- State dir `/home/zaph0d/dockerdata/subwave/state`, bind-mounted at `/var/sub-wave`. Those files are
-  **root-owned**: plain `ssh`/`scp` as zaph0d gets `Permission denied`.
+- Compose dir `/home/zaph0d/macjuu/stacks/subwave` (`compose.yaml` + `.env`) is **untracked** in `macjuu-private`, so the deployment is not reproducible from git.
+- State dir `/home/zaph0d/dockerdata/subwave/state` → `/var/sub-wave`. Files are **root-owned**: plain `ssh`/`scp` as zaph0d gets `Permission denied`.
 - Caddy publishes host port **7700** (API + web). The controller's 7701 is container-internal; nothing listens on host 7701.
 
 ### Read live config — the only correct way
@@ -32,26 +30,20 @@ ssh homeserver 'docker exec sub-wave-controller ls /var/sub-wave'
 
 Never `scp`, `chown`, or hand-edit those files: the controller owns them and rewrites them.
 
-- `settings.json` (~20 KB, 52 top-level keys) is the entire station config. `personas[]` and `activePersonaId`
-  live **inside it**, so "persona config" and "station config" are one document.
-- `schedule.json` = `{shows[], schedule, override}`. `schedule` maps day `"0".."6"` (JS `getDay()`, 0 = Sunday)
-  to 24 show ids.
+- `settings.json` (~20 KB, 52 top-level keys) is the whole station config; `personas[]` and `activePersonaId` live **inside it**, so persona and station config are one document.
+- `schedule.json` = `{shows[], schedule, override}`; `schedule` maps day `"0".."6"` (JS `getDay()`, 0 = Sunday) to 24 show ids.
 - `skills/<slug>/SKILL.md` holds custom skills: 12 on the host, 5 enabled.
-- Runtime or derived, never copy or edit: `library.db*`, `secrets.env`, `icecast-secrets.env`,
-  `icecast_listener_auth.txt`, `liquidsoap_*.txt` (mirrors of settings knobs), `audience.json`, `queue.json`,
-  `recent-plays.json`, `archive/`, `sessions/`, `logs/`.
+- Runtime or derived, never copy or edit: `library.db*`, `secrets.env`, `icecast-secrets.env`, `icecast_listener_auth.txt`, `liquidsoap_*.txt` (mirrors of settings knobs), `audience.json`, `queue.json`, `recent-plays.json`, `archive/`, `sessions/`, `logs/`.
 
 ## The API is not the documented API
 
-`GET /api/connect/openapi.json` is a hand-curated 33-path subset (and requires auth) with **no config writes**.
-The read endpoints are presentation views, not the config document:
+`GET /api/connect/openapi.json` is a hand-curated 33-path subset (requires auth) with **no config writes**; the read endpoints are presentation views, not the config document:
 
 - `/api/personas` → only `id`, `name`, `tagline`, `avatar` — even with admin auth.
 - `/api/schedule` → the grid plus shows reduced to 7 of their 26 fields.
 - `/api/settings` (admin) → a **19-key UI summary** (`onAir`, `pickerBusy`, `defaults`, …), *not* `settings.json`.
 
-So: **reads come from the state files above; writes go to the admin API.** Real write routes, from upstream
-`controller/src/routes/`, absent from the OpenAPI export:
+So: **reads come from the state files above; writes go to the admin API.** Real write routes, from upstream `controller/src/routes/`, absent from the OpenAPI export:
 
 | Route | Semantics |
 | --- | --- |
@@ -63,9 +55,16 @@ So: **reads come from the state files above; writes go to the admin API.** Real 
 | `GET /api/backup/export` | admin, ~99 MB gzip backup — not a config-sync path. |
 
 Auth classes: public (none), station (`x-station-auth` listener password; gates `/api/similar-tracks`), admin
-(HTTP Basic `ADMIN_USER`/`ADMIN_PASS`). The MCP server at `/api/mcp` (20 tools) is **on-air control only** —
-request, queue, skip, say, sfx, jingle. It cannot read or write config. Ids are server-generated: `p_xxxxxx`
-for personas, `s_xxxxxx` for shows.
+(HTTP Basic `ADMIN_USER`/`ADMIN_PASS`).
+
+**MCP is control-only, and that is settled.** `/api/mcp` exposes **21 tools** live (verified via `tools/list`;
+`similar_tracks` and `queue_block` are newer than the published docs): health, now_playing, station_state,
+schedule, session, request_song, request_status, search_library, similar_tracks, queue_track, queue_block,
+skip_track, dj_announce, dj_segment, list_skills, run_skill, list_sfx, play_sfx, list_jingles, play_jingle,
+refresh_playlist. **Zero config tools — no persona, show, schedule or settings writer exists over MCP**; those go
+through the admin HTTP API. Do not re-litigate this from `/manual/mcp`, which contradicts itself (heading 17,
+table 19, repo doc 20, live 21): `tools/list` is the truth. Ids are server-generated: `p_xxxxxx` personas,
+`s_xxxxxx` shows.
 
 ## Safety
 

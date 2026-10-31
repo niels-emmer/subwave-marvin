@@ -106,16 +106,17 @@ which agents otherwise never turn on.
 ```sh
 sh scripts/check-secrets.sh          # commit gate: tracked files
 sh scripts/check-secrets.sh --all    # also untracked-but-not-ignored
+
+python3 scripts/subwave.py status    # tier, station, on-air state, repo sync
+python3 scripts/subwave.py pull      # live -> instance/, secrets redacted (--force replaces)
+python3 scripts/subwave.py diff      # drift vs live, exit 1 when drifted
+python3 scripts/subwave.py backup    # settings.json + schedule.json, outside the repo
 ```
 
 Planned, not implemented yet — design in `docs/PLAN.md`:
 
 ```sh
-scripts/subwave.py status            # which tier, which station, what is on air
-scripts/subwave.py pull              # live -> instance/ (secrets redacted)
-scripts/subwave.py diff              # read-only drift report
-scripts/subwave.py apply --dry-run   # print payloads, send nothing
-scripts/subwave.py backup            # refuses at tier 1; includes the schedule at tier 2
+python3 scripts/subwave.py apply --dry-run   # print payloads, send nothing
 ```
 
 ## Layout

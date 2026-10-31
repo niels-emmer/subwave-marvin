@@ -128,6 +128,9 @@ scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE
   custom ones only, never the image's built-ins. `tool.mjs` is deliberately left alone: the station
   quarantines tool code behind a pending/trust review with a sha256, and bypassing that would be a
   security regression. Enabling a skill is `settings.skills.enabled`, already covered by apply.
+- **`onair`** is the imperative surface: JSON-RPC over the station's MCP server for what is happening
+  now. It is deliberately outside the declarative pipeline — never captured, never diffed, never applied —
+  and every air-changing verb needs `--yes`, with `skip` also needing `--expect-id` or `--any-track`.
 - **`restore`** is the other half of `backup`: dry run by default, state files first then assets,
   refuses a backup that is incomplete or whose grid does not resolve, refuses while on air unless
   `--force-now`, verifies the written station and rolls back to the previous state if it does not

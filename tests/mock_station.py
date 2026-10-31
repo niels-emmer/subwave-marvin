@@ -9,6 +9,7 @@ proven without touching a live station:
   GET  /api/state           public; station identity and current state
   GET  /api/personas        public; TRIMMED to 4 fields per persona
   GET  /api/schedule        public; shows TRIMMED to 7 of 26 fields
+  POST /api/mcp               JSON-RPC: initialize, tools/list, tools/call
   GET  /api/dj/skills         admin; the skill catalog, with `seeded` for built-ins
   GET  /api/dj/skills/:slug/file   admin; a skill's fields and brief
   POST /api/dj/skills         admin; create a custom skill
@@ -74,6 +75,32 @@ SETTINGS_SUMMARY_KEYS = (
 )
 
 
+MCP_TOOLS = [
+    ("subwave_health", "station health", {}, False),
+    ("subwave_now_playing", "what is on air", {}, False),
+    ("subwave_station_state", "queue and history", {}, False),
+    ("subwave_schedule", "the grid", {}, False),
+    ("subwave_session", "current session", {}, False),
+    ("subwave_search_library", "search the library", {"q": "string"}, False),
+    ("subwave_similar_tracks", "similar tracks", {"id": "string"}, False),
+    ("subwave_request_status", "request receipt", {"requestId": "string"}, False),
+    ("subwave_list_skills", "list skills", {}, False),
+    ("subwave_list_sfx", "list sfx", {}, False),
+    ("subwave_list_jingles", "list jingles", {}, False),
+    ("subwave_dj_announce", "have the DJ say something", {"message": "string"}, True),
+    ("subwave_dj_segment", "run a DJ segment", {"type": "string"}, True),
+    ("subwave_skip_track", "skip the current track", {"expectId": "string"}, True),
+    ("subwave_request_song", "request a song", {"request": "string"}, True),
+    ("subwave_queue_track", "queue a track", {"id": "string", "title": "string"}, True),
+    ("subwave_queue_block", "queue a block", {"kind": "string"}, True),
+    ("subwave_run_skill", "run a skill", {"name": "string"}, True),
+    ("subwave_play_sfx", "play a sfx", {"name": "string"}, True),
+    ("subwave_play_jingle", "play a jingle", {"filename": "string"}, True),
+    ("subwave_refresh_playlist", "refresh a playlist", {}, True),
+]
+MCP_CONTROL = {name for name, _, _, control in MCP_TOOLS if control}
+
+
 DEFAULT_SKILLS = {
     "curiosity": {"seeded": True, "label": "Curiosity", "cooldown": "90m",
                   "brief": "Wonder aloud about something small."},
@@ -105,6 +132,7 @@ class Station:
         self.schedule = copy.deepcopy(schedule)
         self.blocklist = copy.deepcopy(blocklist if blocklist is not None else DEFAULT_BLOCKLIST)
         self.skills = copy.deepcopy(DEFAULT_SKILLS)
+        self.mcp_calls = []
         self.admin_user = admin_user
         self.admin_pass = admin_pass
         self.max_shows = max_shows
@@ -208,6 +236,28 @@ class Station:
         if len(self.blocklist["rules"]) == before:
             return 404, {"error": "no such rule"}
         return 200, {"ok": True}
+
+    def mcp_tools(self):
+        return [{"name": name, "description": text,
+                 "inputSchema": {"type": "object", "properties": {
+                     key: {"type": "string"} for key in props},
+                     "required": [key for key in props]}}
+                for name, text, props, _ in MCP_TOOLS]
+
+    def mcp_result(self, name, arguments):
+        if name == "subwave_now_playing":
+            return {"nowPlaying": {"title": "Mock Track", "artist": "Mock Artist"},
+                    "activeShow": {"name": "Mock Show"}}
+        if name == "subwave_station_state":
+            return {"queue": [], "history": []}
+        if name == "subwave_search_library":
+            return {"tracks": [{"id": "tr-1", "title": "First Result", "artist": "A"},
+                               {"id": "tr-2", "title": "Second Result", "artist": "B"}]}
+        if name == "subwave_request_song":
+            return {"requestId": "req-1", "status": "pending"}
+        if name == "subwave_request_status":
+            return {"requestId": arguments.get("requestId"), "status": "queued"}
+        return {"ok": True, "tool": name}
 
     def public_skills(self):
         return {"skills": [{"kind": slug, "seeded": bool(skill.get("seeded")),
@@ -413,6 +463,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _mcp(self, body):
+        payload = body if isinstance(body, dict) else {}
+        method = payload.get("method")
+        if method == "initialize":
+            return self._send(200, {"jsonrpc": "2.0", "id": payload.get("id"),
+                                    "result": {"protocolVersion": "2025-06-18",
+                                               "capabilities": {"tools": {}},
+                                               "serverInfo": {"name": "mock-subwave"}}})
+        if method == "tools/list":
+            return self._send(200, {"jsonrpc": "2.0", "id": payload.get("id"),
+                                    "result": {"tools": self.station.mcp_tools()}})
+        if method == "tools/call":
+            params = payload.get("params") or {}
+            name = params.get("name")
+            arguments = params.get("arguments") or {}
+            authorised = self._authorised()
+            if name in MCP_CONTROL and not authorised:
+                self.station.mcp_calls.append({"tool": name, "arguments": arguments,
+                                               "authorised": False})
+                return self._send(401, {"error": "unauthorized"})
+            self.station.mcp_calls.append({"tool": name, "arguments": arguments,
+                                           "authorised": authorised})
+            result = self.station.mcp_result(name, arguments)
+            return self._send(200, {"jsonrpc": "2.0", "id": payload.get("id"),
+                                    "result": {"content": [
+                                        {"type": "text", "text": json.dumps(result)}]}})
+        return self._send(200, {"jsonrpc": "2.0", "id": payload.get("id"),
+                                "error": {"code": -32601, "message": "unknown method %r"
+                                          % method}})
+
     def _admin(self, method, path, body):
         """Record and enforce auth. Returns True when the request may proceed."""
         if self._authorised():
@@ -430,6 +510,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/now-playing":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.now_playing())
+        if path == "/api/mcp":
+            return self._mcp(body)
         if path == "/api/dj/skills":
             if not self._admin("GET", path, None):
                 return
@@ -479,6 +561,8 @@ class Handler(BaseHTTPRequestHandler):
             self.station.record("POST", path, body, True)
             code, payload = self.station.merge_settings(body or {})
             return self._send(code, payload)
+        if path == "/api/mcp":
+            return self._mcp(body)
         if path == "/api/dj/skills":
             if not self._admin("POST", path, body):
                 return

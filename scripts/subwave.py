@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -3641,6 +3642,299 @@ def cmd_skills(config, args):
     raise ToolError("unknown skills command %r" % action)
 
 
+# --------------------------------------------------------------------------
+# onair: ephemeral control through the station's MCP server
+#
+# THE BOUNDARY. Everything else in this toolkit is declarative: it describes what
+# the station IS, and apply makes the station match. This is the one imperative
+# surface - it changes what is happening NOW. Nothing here is captured, diffed,
+# validated, pruned or applied, and nothing it does belongs in git. Mixing the
+# two would destroy the property that makes apply safe.
+# --------------------------------------------------------------------------
+
+MCP_PATH = "/api/mcp"
+SEGMENT_TYPES = ("station-id", "hourly", "link", "banter", "programme-intro",
+                 "programme-feature", "programme-outro")
+
+
+class McpClient:
+    """Minimal JSON-RPC over Streamable HTTP. urllib only, no SDK."""
+
+    def __init__(self, config, timeout=DEFAULT_TIMEOUT):
+        self.config = config
+        self.timeout = timeout
+        self.session = None
+        self._next_id = 1
+
+    def _post(self, payload, auth=True):
+        config = self.config
+        config.require_http()
+        url = config.base_url + MCP_PATH
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=data, method="POST")
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Accept", "application/json, text/event-stream")
+        # Read tools need nothing; a control tool answers 401 without credentials
+        # and that error names what is missing. Sending the header when we have it
+        # keeps one code path for both.
+        if auth and config.admin_user and config.admin_pass:
+            token = base64.b64encode(
+                ("%s:%s" % (config.admin_user, config.admin_pass)).encode()).decode("ascii")
+            request.add_header("Authorization", "Basic " + token)
+        if self.session:
+            request.add_header("mcp-session-id", self.session)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                raw = response.read().decode("utf-8", "replace")
+                self.session = response.headers.get("mcp-session-id") or self.session
+                return response.status, _mcp_body(raw)
+        except urllib.error.HTTPError as exc:
+            try:
+                raw = exc.read().decode("utf-8", "replace")
+            finally:
+                exc.close()
+            if exc.code == 401:
+                raise ConfigError(
+                    "the station refused these credentials (HTTP 401): check "
+                    "SUBWAVE_ADMIN_USER and SUBWAVE_ADMIN_PASS")
+            raise ToolError("MCP request failed: HTTP %s %s" % (exc.code, raw[:200]))
+        except urllib.error.URLError as exc:
+            raise ToolError("cannot reach %s (%s)" % (url, exc.reason))
+
+    def _rpc(self, method, params=None, auth=True):
+        payload = {"jsonrpc": "2.0", "id": self._next_id, "method": method,
+                   "params": params or {}}
+        self._next_id += 1
+        status, body = self._post(payload, auth=auth)
+        if isinstance(body, dict) and body.get("error"):
+            error = body["error"]
+            raise ToolError("MCP error: %s" % (error.get("message") if isinstance(error, dict)
+                                               else error))
+        return (body or {}).get("result") or {}
+
+    def initialize(self):
+        if self.session is not None:
+            return
+        self._rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                 "clientInfo": {"name": "subwave-toolkit", "version": "1"}})
+
+    def tools(self):
+        self.initialize()
+        return self._rpc("tools/list").get("tools") or []
+
+    def call(self, name, arguments):
+        self.initialize()
+        return self._rpc("tools/call", {"name": name, "arguments": arguments or {}})
+
+
+def _mcp_body(raw):
+    """Streamable HTTP answers either plain JSON or an SSE stream."""
+    text = raw.strip()
+    if not text:
+        return {}
+    if text.startswith("{") or text.startswith("["):
+        return json.loads(text)
+    chunks = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
+    for chunk in chunks:
+        if chunk and chunk != "[DONE]":
+            try:
+                return json.loads(chunk)
+            except ValueError:
+                continue
+    return {}
+
+
+def _tool_names(tools):
+    return [tool.get("name") for tool in tools]
+
+
+def _render_result(result):
+    """MCP tool results are content blocks; print the text, never a raw dump."""
+    content = (result or {}).get("content")
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text") or "")
+        if parts:
+            return "\n".join(parts)
+    return json.dumps(result, ensure_ascii=False) if result else "(no content)"
+
+
+def _intended(tool, arguments):
+    return "would call %s with %s" % (tool, json.dumps(arguments, sort_keys=True))
+
+
+def _onair_queue(client, args):
+    """Deterministic: search, then queue the top result or an explicit --pick."""
+    query = args.text
+    if not args.yes:
+        print("dry run   would call subwave_search_library with %s"
+              % json.dumps({"q": query}, sort_keys=True))
+        print("          then subwave_queue_track with the %s result"
+              % ("#%d" % args.pick if args.pick else "top"))
+        print("result    nothing sent; pass --yes to queue it")
+        return EXIT_OK
+
+    results = client.call("subwave_search_library", {"q": query})
+    tracks = _extract_tracks(results)
+    if not tracks:
+        raise ToolError("search for %r returned no tracks" % query)
+    index = (args.pick or 1) - 1
+    if index >= len(tracks):
+        raise ToolError("--pick %d but the search returned %d track(s)"
+                        % (args.pick, len(tracks)))
+    track = tracks[index]
+    arguments = {"id": track["id"], "title": track["title"]}
+    for key in ("artist", "album", "year", "genre"):
+        if track.get(key):
+            arguments[key] = track[key]
+    print("onair     would call subwave_queue_track with %s"
+          % json.dumps(arguments, sort_keys=True))
+    print(_render_result(client.call("subwave_queue_track", arguments)))
+    return EXIT_OK
+
+
+def _extract_tracks(result):
+    """Search results come back as content blocks; find the track list in them."""
+    text = _render_result(result)
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return []
+    candidates = payload if isinstance(payload, list) else (
+        payload.get("tracks") or payload.get("results") or [])
+    tracks = []
+    for item in candidates or []:
+        if isinstance(item, dict) and item.get("id") and item.get("title"):
+            tracks.append(item)
+    return tracks
+
+
+def _onair_request(client, args):
+    """Ask for a song, then poll the receipt and report the outcome."""
+    if not args.yes:
+        print("dry run   would call subwave_request_song with %s"
+              % json.dumps({"request": args.text}, sort_keys=True))
+        print("result    nothing sent; pass --yes to request it")
+        return EXIT_OK
+
+    receipt = client.call("subwave_request_song", {"request": args.text})
+    request_id = _extract_request_id(receipt)
+    print("request   %s" % (request_id or "(no receipt id)"))
+    if not request_id:
+        print(_render_result(receipt))
+        return EXIT_OK
+
+    for attempt in range(10):
+        status = client.call("subwave_request_status", {"requestId": request_id})
+        text = _render_result(status)
+        payload = {}
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            payload = {}
+        state = str(payload.get("status") or "").lower()
+        if state in ("queued", "rejected", "failed", "played", "denied", "done"):
+            print("outcome   %s" % text)
+            return EXIT_OK
+        time.sleep(0.5 if attempt < 9 else 0)
+    print("outcome   still pending after 10 polls; the station will decide in its own time")
+    return EXIT_OK
+
+
+def _extract_request_id(result):
+    text = _render_result(result)
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(payload, dict):
+        return payload.get("requestId") or payload.get("id")
+    return None
+
+
+def cmd_onair(config, args):
+    action = args.onair_command
+    client = McpClient(config)
+
+    if action == "tools":
+        for tool in client.tools():
+            print("%-22s %s" % (tool.get("name"), (tool.get("description") or "")[:70]))
+        return EXIT_OK
+
+    if action == "now":
+        print(_render_result(client.call("subwave_now_playing", {})))
+        return EXIT_OK
+
+    if action == "state":
+        print(_render_result(client.call("subwave_station_state", {})))
+        return EXIT_OK
+
+    if action == "list":
+        mapping = {"skills": "subwave_list_skills", "sfx": "subwave_list_sfx",
+                   "jingles": "subwave_list_jingles"}
+        tool = mapping.get(args.what)
+        if tool is None:
+            raise ToolError("list takes one of: %s" % ", ".join(sorted(mapping)))
+        print(_render_result(client.call(tool, {})))
+        return EXIT_OK
+
+    if action == "queue":
+        return _onair_queue(client, args)
+    if action == "request":
+        return _onair_request(client, args)
+
+    # Everything below changes what is on air.
+    tool, arguments = _onair_call(args)
+    if not args.yes:
+        print("dry run   %s" % _intended(tool, arguments))
+        print("result    nothing sent; pass --yes to put it on air")
+        return EXIT_OK
+
+    if action == "skip" and not (args.expect_id or args.any_track):
+        raise ToolError(
+            "skip needs --expect-id <id> (skip only if that track is playing) or --any-track. "
+            "Skipping is the most disruptive thing the station can do and has no undo.")
+
+    result = client.call(tool, arguments)
+    print("onair     %s" % _intended(tool, arguments))
+    print(_render_result(result))
+    return EXIT_OK
+
+
+def _onair_call(args):
+    """The (tool, arguments) an onair verb maps to. No side effects."""
+    action = args.onair_command
+    if action == "say":
+        arguments = {"message": args.text}
+        if args.raw:
+            arguments["mode"] = "raw"
+        if args.over_track:
+            arguments["placement"] = "over"
+        if args.sfx:
+            arguments["sfx"] = args.sfx
+        return "subwave_dj_announce", arguments
+    if action == "segment":
+        if args.type not in SEGMENT_TYPES:
+            raise ToolError("segment type must be one of: %s" % ", ".join(SEGMENT_TYPES))
+        return "subwave_dj_segment", {"type": args.type}
+    if action == "skip":
+        arguments = {}
+        if args.expect_id:
+            arguments["expectId"] = args.expect_id
+        return "subwave_skip_track", arguments
+    if action == "request":
+        return "subwave_request_song", {"request": args.text}
+    if action == "queue":
+        return "subwave_search_library", {"q": args.text}
+    if action == "sfx":
+        return "subwave_play_sfx", {"name": args.name}
+    if action == "jingle":
+        return "subwave_play_jingle", {"filename": args.name}
+    raise ToolError("unknown onair command %r" % action)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="subwave.py",
@@ -3659,6 +3953,60 @@ def build_parser():
 
     diff = sub.add_parser("diff", help="read-only drift report")
     diff.set_defaults(func=cmd_diff)
+
+    onair = sub.add_parser("onair", help="ephemeral on-air control via the station's MCP server")
+    onair_sub = onair.add_subparsers(dest="onair_command", required=True)
+
+    def _air_parser(name, help_text):
+        parser = onair_sub.add_parser(name, help=help_text)
+        parser.add_argument("--yes", action="store_true",
+                            help="actually send it; without this nothing goes on air")
+        return parser
+
+    onair_tools = onair_sub.add_parser("tools", help="the tools the station exposes")
+    onair_tools.set_defaults(func=cmd_onair)
+    onair_now = onair_sub.add_parser("now", help="what is on air")
+    onair_now.set_defaults(func=cmd_onair)
+    onair_state = onair_sub.add_parser("state", help="queue and recent history")
+    onair_state.set_defaults(func=cmd_onair)
+
+    onair_say = _air_parser("say", "have the DJ say something")
+    onair_say.add_argument("text")
+    onair_say.add_argument("--raw", action="store_true", help="say it verbatim")
+    onair_say.add_argument("--over-track", action="store_true", help="talk over the music")
+    onair_say.add_argument("--sfx", help="play this sfx first")
+    onair_say.set_defaults(func=cmd_onair)
+
+    onair_seg = _air_parser("segment", "run a programmed DJ segment")
+    onair_seg.add_argument("type", choices=SEGMENT_TYPES)
+    onair_seg.set_defaults(func=cmd_onair)
+
+    onair_skip = _air_parser("skip", "skip the current track (destructive, no undo)")
+    onair_skip.add_argument("--expect-id", help="only skip if this track is playing")
+    onair_skip.add_argument("--any-track", action="store_true",
+                            help="skip whatever is playing")
+    onair_skip.set_defaults(func=cmd_onair)
+
+    onair_req = _air_parser("request", "request a song in natural language")
+    onair_req.add_argument("text")
+    onair_req.set_defaults(func=cmd_onair)
+
+    onair_q = _air_parser("queue", "search and queue a track")
+    onair_q.add_argument("text")
+    onair_q.add_argument("--pick", type=int, help="queue the Nth result instead of the top one")
+    onair_q.set_defaults(func=cmd_onair)
+
+    onair_sfx = _air_parser("sfx", "play a sound effect")
+    onair_sfx.add_argument("name")
+    onair_sfx.set_defaults(func=cmd_onair)
+
+    onair_jingle = _air_parser("jingle", "play a jingle")
+    onair_jingle.add_argument("name")
+    onair_jingle.set_defaults(func=cmd_onair)
+
+    onair_list = onair_sub.add_parser("list", help="list skills, sfx or jingles")
+    onair_list.add_argument("what", choices=("skills", "sfx", "jingles"))
+    onair_list.set_defaults(func=cmd_onair)
 
     skills_cmd = sub.add_parser("skills", help="author station skills locally (no network)")
     skills_sub = skills_cmd.add_subparsers(dest="skills_command", required=True)

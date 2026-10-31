@@ -104,6 +104,13 @@ every show and the whole grid do not. So `backup` copies the config **and** thos
   `instance/blocklist.lock.json`.** The station mints the uuid; without the lock every apply would POST a
   new one for the same rule, filling RULES_MAX=50 with near-duplicates while `matchCount` still looked
   plausible. Never POST a rule that already has a uuid, and never send the slug to the station.
+- **On-air control is ephemeral, and separate from everything else.** `onair` talks to the station's MCP
+  server at `/api/mcp` to change what is happening NOW — say, skip, queue, request, sfx, jingle. It is the
+  one imperative surface: it never appears in `pull`, `diff`, `validate`, `apply` or `--prune`, nothing it
+  does is captured, and nothing it does belongs in git. Config never goes through MCP and on-air state never
+  goes through apply. Anything that changes air needs `--yes`; without it the tool prints the exact tool and
+  arguments and sends nothing. `onair skip` additionally needs `--expect-id` or `--any-track`, because a
+  skip has no undo.
 - **Station skills are operator content; built-ins are not.** `pull` captures only custom skills — the
   image's built-ins (read from `src/skills/builtins` in the container) are skipped, because they are not
   the operator's. `apply` creates with `POST /api/dj/skills` and updates with `PUT /dj/skills/:slug/file`,
@@ -164,6 +171,8 @@ python3 scripts/subwave.py restore <dir>  # put a backup back (dry run; --yes wr
 python3 scripts/subwave.py validate  # check instance/ before applying (--dir DIR for any station)
 python3 scripts/subwave.py blocklist list|block|unblock|rm|rule   # author locally (no network)
 python3 scripts/subwave.py skills list|new|show|edit|rm           # station skills (no network)
+python3 scripts/subwave.py onair tools|now|state|list              # read the station over MCP
+python3 scripts/subwave.py onair say|segment|skip|request|queue|sfx|jingle --yes   # ephemeral, needs --yes
 python3 scripts/subwave.py character init --from demo   # scaffold a character layer (no network)
 python3 scripts/subwave.py character new-persona|new-show|add-to-grid   # author personas, shows, grid
 python3 scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE  # change named fields only

@@ -246,6 +246,56 @@ class DiffAfterApplyTests(ApplyTestCase):
         self.assertIn("trimmed comparison", buffer.getvalue())
 
 
+class BackupBeforeWriteTests(ApplyTestCase):
+    """apply --yes without --no-backup takes a backup first.
+
+    This path had no coverage: every other apply test passes --no-backup, so a
+    return-signature change in take_backup shipped broken and 166 green tests did
+    not notice.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.backup_root = self.tmp / "backups"
+        # Tier 2 with the mock's state dir standing in for the host.
+        self._saved_source = subwave.SshStateSource
+        self._saved_tier = subwave.detect_tier
+        self._saved_read = subwave.read_state_file
+        subwave.SshStateSource = lambda config: subwave.LocalStateSource(
+            self.server.state_dir)
+        subwave.read_state_file = lambda config, name: (
+            Path(self.server.state_dir) / name).read_text()
+        subwave.detect_tier = lambda config, probe=None: (2, "mock state dir")
+        self.addCleanup(self._restore_globals)
+
+    def _restore_globals(self):
+        subwave.SshStateSource = self._saved_source
+        subwave.read_state_file = self._saved_read
+        subwave.detect_tier = self._saved_tier
+
+    def test_apply_without_no_backup_takes_one_and_proceeds(self):
+        before = len(self.log())
+        args = argparse.Namespace(yes=True, force_now=True, no_backup=False,
+                                  prune=False, backup_dir=str(self.backup_root))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = subwave.cmd_apply(self.config(), args)
+        output = buffer.getvalue()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("backup    ", output)
+        self.assertNotIn("skipped", output)
+
+        stamps = sorted(self.backup_root.glob("*/*"))
+        self.assertEqual(len(stamps), 1, "exactly one backup should be taken")
+        self.assertTrue((stamps[0] / "settings.json").is_file())
+        self.assertTrue((stamps[0] / "schedule.json").is_file())
+        self.assertTrue((stamps[0] / "RESTORE.md").is_file())
+
+        writes = [entry for entry in self.log()[before:] if entry["method"] != "GET"]
+        self.assertTrue(writes, "apply must still write after taking the backup")
+
+
 class IdempotenceTests(ApplyTestCase):
     def test_apply_twice_reports_no_changes_the_second_time(self):
         self.run_apply(yes=True)

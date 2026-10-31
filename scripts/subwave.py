@@ -1283,7 +1283,7 @@ def cmd_apply(config, args):
     if args.no_backup:
         print("backup    skipped (--no-backup)")
     elif tier == 2:
-        destination, _, _ = take_backup(config, args.backup_dir)
+        destination, _ = take_backup(config, args.backup_dir)
         print("backup    %s" % destination)
     else:
         raise ToolError(

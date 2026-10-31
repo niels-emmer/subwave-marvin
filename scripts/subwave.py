@@ -203,13 +203,14 @@ def http_json(config, path, admin=False, station=False, method="GET", body=None,
         raise ToolError("%s did not return JSON (%s)" % (url, exc))
 
 
-def ssh_run(config, remote_command, timeout=DEFAULT_TIMEOUT, binary=False):
+def ssh_run(config, remote_command, timeout=DEFAULT_TIMEOUT, binary=False, stdin=None):
     """Run a command on the host. Returns CompletedProcess."""
     if not config.host:
         raise ConfigError("SUBWAVE_HOST is not set")
     argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", config.host, remote_command]
     try:
-        return subprocess.run(argv, capture_output=True, text=not binary, timeout=timeout)
+        return subprocess.run(argv, capture_output=True, text=not binary,
+                              input=stdin, timeout=timeout)
     except FileNotFoundError:
         raise ToolError("ssh is not installed or not on PATH")
     except subprocess.TimeoutExpired:
@@ -785,6 +786,16 @@ class LocalStateSource:
     def read_bytes(self, relative):
         return (self.root / relative).read_bytes()
 
+    def write_bytes(self, relative, payload):
+        target = self.root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+
+    def remove(self, relative):
+        target = self.root / relative
+        if target.exists():
+            target.unlink()
+
 
 class SshStateSource:
     """The real thing: a root-owned state dir inside the controller container."""
@@ -811,6 +822,31 @@ class SshStateSource:
                 relative, (result.stderr or b"").decode("utf-8", "replace").strip()
                 or "unknown error"))
         return result.stdout
+
+    def write_bytes(self, relative, payload):
+        path = "%s/%s" % (self.config.state_dir, relative)
+        parent = path.rsplit("/", 1)[0]
+        made = ssh_run(self.config, "docker exec %s mkdir -p '%s'"
+                       % (self.config.container, parent))
+        if made.returncode != 0:
+            raise ToolError("cannot create %s: %s"
+                            % (parent, (made.stderr or "").strip() or "unknown error"))
+        result = ssh_run(self.config,
+                         "docker exec -i %s sh -c \"cat > '%s'\""
+                         % (self.config.container, path),
+                         binary=True, stdin=payload)
+        if result.returncode != 0:
+            raise ToolError("cannot write %s: %s" % (
+                relative, (result.stderr or b"").decode("utf-8", "replace").strip()
+                or "unknown error"))
+
+    def remove(self, relative):
+        path = "%s/%s" % (self.config.state_dir, relative)
+        result = ssh_run(self.config, "docker exec %s rm -f '%s'"
+                         % (self.config.container, path))
+        if result.returncode != 0:
+            raise ToolError("cannot remove %s: %s"
+                            % (path, (result.stderr or "").strip() or "unknown error"))
 
 
 def select_backup_files(files, with_library=False):
@@ -1980,6 +2016,207 @@ def cmd_character(config, args):
     raise ToolError("unknown character command %r" % action)
 
 
+# --------------------------------------------------------------------------
+# restore: put a backup back, in the order a station can survive
+# --------------------------------------------------------------------------
+
+class BackupError(ToolError):
+    """The backup cannot be restored as-is."""
+
+
+def load_backup(directory):
+    """Read a backup and prove it is complete before anything is written.
+
+    A backup that cannot restore the programming must not be restored as if it
+    could: half a station is worse than none.
+    """
+    root = Path(directory).expanduser()
+    if not root.is_dir():
+        raise BackupError("no backup directory at %s" % root)
+
+    def read_json(name):
+        path = root / name
+        if not path.is_file():
+            raise BackupError("%s is missing: this is not a complete backup" % path)
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise BackupError("%s is not valid JSON (%s)" % (path, exc))
+
+    manifest = read_json("manifest.json")
+    settings = read_json("settings.json")
+    schedule = read_json("schedule.json")
+
+    # manifest against the files actually present
+    listed = set(manifest.get("copied") or [])
+    present = set()
+    for name in ("settings.json", "schedule.json"):
+        present.add(name)
+    state_dir = root / "state"
+    if state_dir.is_dir():
+        for path in state_dir.rglob("*"):
+            if path.is_file():
+                present.add(path.relative_to(state_dir).as_posix())
+    missing = sorted(listed - present)
+    if missing:
+        raise BackupError(
+            "the manifest lists %d file(s) that are not in the backup, first: %s. "
+            "This backup is incomplete." % (len(missing), missing[0]))
+
+    # the programming must be internally consistent
+    shows = schedule.get("shows") or []
+    if not shows:
+        raise BackupError("schedule.json has no shows: nothing to restore")
+    show_ids = {show.get("id") for show in shows}
+    grid = schedule.get("schedule") or {}
+    if sorted(grid) != [str(day) for day in range(7)]:
+        raise BackupError("schedule.json must have days 0..6, found %s" % sorted(grid))
+    for day, cells in grid.items():
+        if not isinstance(cells, list) or len(cells) != 24:
+            raise BackupError("schedule.json day %s must have 24 cells" % day)
+        for hour, cell in enumerate(cells):
+            if cell and cell not in show_ids:
+                raise BackupError(
+                    "schedule.json day %s hour %02d names %r, which is not a show in this "
+                    "backup: it cannot restore the programming" % (day, hour, cell))
+
+    if not isinstance(settings.get("personas"), list) or not settings.get("personas"):
+        raise BackupError("settings.json has no personas")
+
+    assets = sorted(relative for relative in present
+                    if relative not in ("settings.json", "schedule.json"))
+    return {
+        "root": root,
+        "manifest": manifest,
+        "settings": settings,
+        "schedule": schedule,
+        "settings_text": (root / "settings.json").read_bytes(),
+        "schedule_text": (root / "schedule.json").read_bytes(),
+        "assets": assets,
+    }
+
+
+def _read_asset(backup, relative):
+    return (backup["root"] / "state" / relative).read_bytes()
+
+
+def _state_documents(state):
+    """Read the two config documents back from wherever we just wrote them."""
+    return (json.loads(state.read_bytes("settings.json").decode("utf-8")),
+            json.loads(state.read_bytes("schedule.json").decode("utf-8")))
+
+
+def _state_is_consistent(state):
+    """The post-write check. Returns a problem string, or None."""
+    try:
+        settings, schedule = _state_documents(state)
+    except Exception as exc:
+        return "the written documents are not valid JSON (%s)" % exc
+    shows = schedule.get("shows") or []
+    if not shows:
+        return "the written schedule has no shows"
+    show_ids = {show.get("id") for show in shows}
+    for day, cells in (schedule.get("schedule") or {}).items():
+        for hour, cell in enumerate(cells):
+            if cell and cell not in show_ids:
+                return "day %s hour %02d names %r, which is not a show" % (day, hour, cell)
+    if not (settings.get("personas") or []):
+        return "the written settings have no personas"
+    return None
+
+
+def cmd_restore(config, args):
+    tier, detail = detect_tier(config)
+    print("tier      %s" % TIER_LABEL[tier], flush=True)
+    if tier != 2:
+        raise ToolError(
+            "a tier-1 restore is impossible: the admin API cannot write schedule.json, so the "
+            "programming could not be put back. Add SUBWAVE_HOST and SUBWAVE_STATE_DIR.")
+
+    state = SshStateSource(config)
+    backup = load_backup(args.directory)
+    print("backup    %s" % backup["root"])
+    print("verified  manifest matches %d file(s); %d shows; grid resolves"
+          % (len(backup["manifest"].get("copied") or []),
+             len(backup["schedule"].get("shows") or [])))
+
+    # The on-air guard blocks the WRITE, not the plan: a dry run writes nothing,
+    # so it is still useful on a live station and only warns.
+    on_air = None
+    if not args.force_now:
+        status, now = http_json(config, "/api/now-playing")
+        active = (now or {}).get("activeShow") or {}
+        if status == 200 and active.get("name"):
+            on_air = active.get("name")
+    if on_air and args.yes:
+        raise ToolError(
+            "refusing to restore while the station is on air (%s). Restoring replaces the "
+            "config and the assets under a running mixer. Wait for an off-air window, or pass "
+            "--force-now to override that guard deliberately." % on_air)
+    if on_air:
+        print("warning   the station is on air (%s): a real restore would be refused. "
+              "Pass --force-now to override that." % on_air)
+
+    targets = [("settings.json", backup["settings_text"]),
+               ("schedule.json", backup["schedule_text"])]
+    for relative in backup["assets"]:
+        targets.append((relative, None))  # read lazily: assets can be large
+
+    print("order     1. state files (settings.json, schedule.json)")
+    if backup["assets"]:
+        dirs = sorted({relative.split("/")[0] for relative in backup["assets"] if "/" in relative})
+        print("          2. assets: %s" % ", ".join(dirs))
+    print("          3. then restart the mixer: the controller owns these files and "
+          "regenerates the Icecast config from them on restart")
+
+    if not args.yes:
+        print("mode      dry run - nothing is written")
+        for relative, _ in targets:
+            print("would     %s/%s" % (config.state_dir, relative))
+        print("result    %d file(s) would be written; 0 written" % len(targets))
+        return EXIT_OK
+
+    # snapshot what we are about to overwrite, so a bad restore can be undone
+    existing = set(state.list_files())
+    snapshot = {}
+    for relative, _ in targets:
+        if relative in existing:
+            snapshot[relative] = state.read_bytes(relative)
+
+    written = []
+    try:
+        for relative, payload in targets:
+            state.write_bytes(relative, payload if payload is not None
+                              else _read_asset(backup, relative))
+            written.append(relative)
+            print("wrote     %s/%s" % (config.state_dir, relative))
+    except ToolError as exc:
+        _rollback(state, snapshot, written)
+        raise ToolError("restore failed part-way (%s); the previous state was put back" % exc)
+
+    problem = _state_is_consistent(state)
+    if problem:
+        _rollback(state, snapshot, written)
+        raise ToolError("the restored station did not validate (%s); the previous state was put "
+                        "back. Nothing was left half-written." % problem)
+
+    print("result    %d file(s) restored and verified" % len(targets))
+    print("next      restart the mixer, then: subwave.py status")
+    return EXIT_OK
+
+
+def _rollback(state, snapshot, written):
+    """Put back every file we replaced, and remove the ones we created."""
+    for relative in written:
+        if relative in snapshot:
+            state.write_bytes(relative, snapshot[relative])
+        else:
+            try:
+                state.remove(relative)
+            except Exception:
+                pass
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="subwave.py",
@@ -2055,6 +2292,13 @@ def build_parser():
     apply_cmd.add_argument("--backup-dir", help="where to put the pre-apply backup")
     apply_cmd.add_argument("--prune", action="store_true", help="reserved; not implemented")
     apply_cmd.set_defaults(func=cmd_apply)
+
+    restore = sub.add_parser("restore", help="put a backup back (dry run by default)")
+    restore.add_argument("directory", help="a directory written by backup")
+    restore.add_argument("--yes", action="store_true", help="perform the restore")
+    restore.add_argument("--force-now", action="store_true",
+                         help="restore even while the station is on air")
+    restore.set_defaults(func=cmd_restore)
 
     backup = sub.add_parser("backup", help="copy config + assets outside the repo")
     backup.add_argument("--dir", help="base directory (default ~/.subwave-backups)")

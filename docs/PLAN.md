@@ -110,6 +110,10 @@ scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE
 - **`apply`** is idempotent and ordered: personas → shows → settings sections → grid last, because shows
   reference personas and the grid references shows. Secret-preserving merge keeps live credentials when
   a section containing them is sent. Deletes are never part of `apply`.
+- **`restore`** is the other half of `backup`: dry run by default, state files first then assets,
+  refuses a backup that is incomplete or whose grid does not resolve, refuses while on air unless
+  `--force-now`, verifies the written station and rolls back to the previous state if it does not
+  validate.
 - **`backup`** exists because the built-in export silently loses the programming, and because ours
   must not lose the assets in turn: tier 2 copies `settings.json`, `schedule.json`, `skills/`, `sfx/`,
   `jingles/`, `beds/`, `themes/`, `persona-avatars/` and their manifests, skips `library.db` unless

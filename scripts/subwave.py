@@ -1313,20 +1313,28 @@ SHOW_FIELDS = frozenset((
 # `character edit-*` is strict, because a string where an integer belongs, or an
 # enum outside the set, is dropped or ignored by the station's shallow merge.
 #
-# The vocabularies are the values this repo's own station shape uses: the
-# scaffold defaults, examples/demo, tests/fixtures/station.json, and the values
-# named in skills/explain-host/SKILL.md. The station's full enum is not published
-# here, so a value outside these is refused with the allowed set rather than
-# guessed at.
+# SOURCE OF TRUTH: upstream SUB/WAVE, `controller/src/schemas/persona.ts`
+# (PERSONA_FREQUENCIES, PERSONA_SCRIPT_LENGTHS, PERSONA_LINK_STYLES), re-exported
+# by `controller/src/settings/vocab.ts` as FREQUENCIES / SCRIPT_LENGTHS /
+# LINK_STYLES. Re-check these against that file before changing them; do not
+# widen a list by guessing. Order is the product's ladder, not alphabetical:
+# `controller/src/settings/persona.ts` bumps a persona "one rung up" with
+# `FREQUENCIES.indexOf(...)`, so silent -> aggressive is meaningful.
 PERSONA_ENUMS = {
-    "frequency": ("chatty", "moderate"),
-    "scriptLength": ("concise", "storyteller"),
-    "linkStyle": ("natural",),
+    "frequency": ("silent", "quiet", "moderate", "chatty", "aggressive"),
+    "scriptLength": ("one-liner", "concise", "extended", "storyteller"),
+    "linkStyle": ("natural", "announce"),
 }
 
+# Show side, from upstream `controller/src/schemas/show.ts`:
+# - SHOW_ENERGY = low, medium, high (an ordered ladder)
+# - SHOW_VOCALS = instrumental, vocal; the field also accepts '' ("any")
+# - moods is deliberately NOT an enum: `showStringList({ values: ctx.moodNames })`
+#   validates against the station's own installed mood names, which this toolkit
+#   cannot read, so moods stays a free-form list here.
 SHOW_ENUMS = {
-    "energies": ("high", "low", "medium"),
-    "moods": ("morning", "night", "reflective", "sunny"),
+    "energies": ("low", "medium", "high"),
+    "vocals": ("", "instrumental", "vocal"),
 }
 
 # kind -> field -> how one `--set field=value` becomes a JSON value. `id` is
@@ -1343,11 +1351,11 @@ SHOW_TYPES = {
     "banter": "boolean", "energies": "enum-list", "eras": "json",
     "excludedPlaylistIds": "list", "fadeAtShowEnd": "boolean", "filtersStrict": "boolean",
     "genres": "list", "guestPersonaIds": "list", "maxTrackSeconds": "integer",
-    "minTrackLengthSeconds": "integer", "moods": "enum-list", "name": "string",
+    "minTrackLengthSeconds": "integer", "moods": "list", "name": "string",
     "pauseTalk": "boolean", "personaId": "string", "playlistExhaust": "boolean",
     "playlistIds": "list", "playlistInOrder": "boolean", "playlistStrict": "boolean",
     "preparationSkill": "string", "programme": "boolean", "segmentSkill": "string",
-    "tags": "list", "themeId": "string", "topic": "string", "vocals": "string",
+    "tags": "list", "themeId": "string", "topic": "string", "vocals": "enum",
 }
 
 CHARACTER_REQUIRED = ("name", "description", "locale", "timezone", "theme", "houseRules")
@@ -1690,11 +1698,14 @@ def _split_list(raw):
     return items
 
 
-def parse_field_value(kind, field, raw):
+def parse_field_value(kind, field, raw, force=False):
     """Turn one `--set field=value` into the JSON value that field must hold.
 
     Explicit by design: an integer field rejects "6.5" instead of stringifying
     it, a boolean accepts only true/false, and an enum names its allowed set.
+    `force` (from --force-value) lets an off-vocabulary enum value through with a
+    loud warning, for a station that knows a value this tool does not; it never
+    relaxes integers, booleans or the JSON shape.
     """
     spec = (PERSONA_TYPES if kind == "persona" else SHOW_TYPES)[field]
     enums = PERSONA_ENUMS if kind == "persona" else SHOW_ENUMS
@@ -1716,17 +1727,26 @@ def parse_field_value(kind, field, raw):
     if spec == "enum":
         allowed = enums[field]
         if text not in allowed:
-            raise ToolError("%s must be one of: %s (got %r)"
-                            % (field, ", ".join(allowed), raw))
+            if not force:
+                raise ToolError("%s must be one of: %s (got %r)"
+                                % (field, ", ".join(allowed), raw))
+            print("warning   %s %r is outside the known vocabulary (%s); --force-value sends "
+                  "it anyway, and the station may still reject or normalise it"
+                  % (field, text, ", ".join(allowed)), file=sys.stderr)
         return text
     if spec == "enum-list":
         allowed = enums[field]
         items = _split_list(raw)
         bad = [item for item in items if item not in allowed]
         if bad:
-            raise ToolError("%s must be one of: %s (got %s)"
-                            % (field, ", ".join(allowed),
-                               ", ".join(repr(item) for item in bad)))
+            if not force:
+                raise ToolError("%s must be one of: %s (got %s)"
+                                % (field, ", ".join(allowed),
+                                   ", ".join(repr(item) for item in bad)))
+            print("warning   %s %s outside the known vocabulary (%s); --force-value sends "
+                  "them anyway, and the station may still reject or normalise them"
+                  % (field, ", ".join(repr(item) for item in bad), ", ".join(allowed)),
+                  file=sys.stderr)
         return items
     if spec == "list":
         return _split_list(raw)
@@ -1797,7 +1817,8 @@ def edit_entity(root, kind, args):
             raise ToolError("internal: no edit type for %s.%s" % (kind, field))
         seen.add(field)
 
-        value = parse_field_value(kind, field, raw)
+        value = parse_field_value(kind, field, raw,
+                                  force=getattr(args, "force_value", False))
         present = field in document
         if present and document[field] == value:
             continue
@@ -2032,6 +2053,9 @@ def build_parser():
     char_edit_persona.add_argument("slug")
     char_edit_persona.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE",
                                    help="field to change, repeatable (e.g. --set warmth=7)")
+    char_edit_persona.add_argument("--force-value", dest="force_value", action="store_true",
+                                   help="allow a value outside the known vocabulary (warns loudly; "
+                                        "for a station that knows more than this tool)")
     char_edit_persona.set_defaults(func=cmd_character)
 
     char_edit_show = char_sub.add_parser(
@@ -2039,6 +2063,9 @@ def build_parser():
     char_edit_show.add_argument("slug")
     char_edit_show.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE",
                                 help="field to change, repeatable (e.g. --set banter=true)")
+    char_edit_show.add_argument("--force-value", dest="force_value", action="store_true",
+                                help="allow a value outside the known vocabulary (warns loudly; "
+                                     "for a station that knows more than this tool)")
     char_edit_show.set_defaults(func=cmd_character)
 
     validate_cmd = sub.add_parser("validate", help="check instance/ before applying")

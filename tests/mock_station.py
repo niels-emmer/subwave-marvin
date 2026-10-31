@@ -9,6 +9,10 @@ proven without touching a live station:
   GET  /api/state           public; station identity and current state
   GET  /api/personas        public; TRIMMED to 4 fields per persona
   GET  /api/schedule        public; shows TRIMMED to 7 of 26 fields
+  GET  /api/dj/skills         admin; the skill catalog, with `seeded` for built-ins
+  GET  /api/dj/skills/:slug/file   admin; a skill's fields and brief
+  POST /api/dj/skills         admin; create a custom skill
+  PUT  /api/dj/skills/:slug/file   admin; update a custom skill
   GET  /api/library/blocklist  admin; the third config document, returned whole
   POST /api/library/blocklist  admin; block an entry; 409 when already blocked
   POST /api/library/blocklist/rules      admin; mint a rule uuid
@@ -70,6 +74,14 @@ SETTINGS_SUMMARY_KEYS = (
 )
 
 
+DEFAULT_SKILLS = {
+    "curiosity": {"seeded": True, "label": "Curiosity", "cooldown": "90m",
+                  "brief": "Wonder aloud about something small."},
+    "demo-skill": {"seeded": False, "label": "Demo skill", "cooldown": "4h",
+                   "brief": "A fictional segment used by the demo station."},
+}
+
+
 DEFAULT_BLOCKLIST = {
     "entries": [
         {"type": "track", "id": "subsonic-1", "name": "Mock Banned Track",
@@ -92,6 +104,7 @@ class Station:
         self.settings = copy.deepcopy(settings)
         self.schedule = copy.deepcopy(schedule)
         self.blocklist = copy.deepcopy(blocklist if blocklist is not None else DEFAULT_BLOCKLIST)
+        self.skills = copy.deepcopy(DEFAULT_SKILLS)
         self.admin_user = admin_user
         self.admin_pass = admin_pass
         self.max_shows = max_shows
@@ -195,6 +208,42 @@ class Station:
         if len(self.blocklist["rules"]) == before:
             return 404, {"error": "no such rule"}
         return 200, {"ok": True}
+
+    def public_skills(self):
+        return {"skills": [{"kind": slug, "seeded": bool(skill.get("seeded")),
+                            "label": skill.get("label") or slug}
+                           for slug, skill in sorted(self.skills.items())]}
+
+    def skill_file(self, slug):
+        skill = self.skills.get(slug)
+        if skill is None:
+            return 404, {"error": "no such skill"}
+        return 200, {"kind": slug, "custom": not skill.get("seeded"),
+                     "exists": True, "label": skill.get("label"),
+                     "cooldown": skill.get("cooldown"),
+                     "brief": skill.get("brief") or ""}
+
+    def create_skill(self, body):
+        slug = (body or {}).get("name")
+        if not slug:
+            return 400, {"error": "name is required"}
+        if slug in self.skills:
+            return 409, {"error": "a skill named %r already exists" % slug}
+        self.skills[slug] = {"seeded": False, "label": body.get("label") or slug,
+                             "cooldown": body.get("cooldown") or "60m",
+                             "brief": body.get("brief") or ""}
+        return 200, {"skills": self.public_skills()["skills"]}
+
+    def update_skill(self, slug, body):
+        skill = self.skills.get(slug)
+        if skill is None:
+            return 404, {"error": "no such custom skill"}
+        if skill.get("seeded"):
+            return 400, {"error": "built-in"}
+        for key in ("label", "cooldown", "brief"):
+            if key in (body or {}):
+                skill[key] = body[key]
+        return 200, {"skills": self.public_skills()["skills"]}
 
     def public_blocklist(self):
         """The stored document plus the live fields the API adds."""
@@ -381,6 +430,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/now-playing":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.now_playing())
+        if path == "/api/dj/skills":
+            if not self._admin("GET", path, None):
+                return
+            self.station.record("GET", path, None, True)
+            return self._send(200, self.station.public_skills())
+        if path.startswith("/api/dj/skills/") and path.endswith("/file"):
+            if not self._admin("GET", path, None):
+                return
+            self.station.record("GET", path, None, True)
+            code, payload = self.station.skill_file(path.split("/")[4])
+            return self._send(code, payload)
         if path == "/api/library/blocklist":
             if not self._admin("GET", path, None):
                 return
@@ -418,6 +478,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.station.record("POST", path, body, True)
             code, payload = self.station.merge_settings(body or {})
+            return self._send(code, payload)
+        if path == "/api/dj/skills":
+            if not self._admin("POST", path, body):
+                return
+            self.station.record("POST", path, body, True)
+            code, payload = self.station.create_skill(body)
             return self._send(code, payload)
         if path == "/api/library/blocklist":
             if not self._admin("POST", path, body):
@@ -464,25 +530,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         path = urlsplit(self.path).path
         body = self._body()
-        if path == "/api/library/blocklist":
-            if not self._admin("GET", path, None):
+        if path.startswith("/api/dj/skills/") and path.endswith("/file"):
+            if not self._admin("PUT", path, body):
                 return
-            self.station.record("GET", path, None, True)
-            return self._send(200, self.station.public_blocklist())
-        if path.startswith("/api/library/blocklist/rules/") and self.command == "PUT":
-            pass  # handled in do_PUT
-        if path == "/api/state":
-            self.station.record("GET", path, None, True)
-            return self._send(200, self.station.public_state())
-        if path == "/api/personas":
-            self.station.record("GET", path, None, True)
-            return self._send(200, self.station.public_personas())
+            self.station.record("PUT", path, body, True)
+            code, payload = self.station.update_skill(path.split("/")[4], body)
+            return self._send(code, payload)
         if path.startswith("/api/library/blocklist/rules/"):
             if not self._admin("PUT", path, body):
                 return
             self.station.record("PUT", path, body, True)
-            rule_id = path.rsplit("/", 1)[-1]
-            code, payload = self.station.update_blocklist_rule(rule_id, body)
+            code, payload = self.station.update_blocklist_rule(
+                path.rsplit("/", 1)[-1], body)
             return self._send(code, payload)
         if path == "/api/schedule":
             if not self._admin("PUT", path, body):
@@ -491,7 +550,6 @@ class Handler(BaseHTTPRequestHandler):
             code, payload = self.station.replace_schedule(body or {})
             return self._send(code, payload)
         return self._send(404, {"error": "not found", "path": path})
-
 
 def build_state_dir(root, settings, schedule, blocklist=None):
     """A state dir with the shape the real one has: config, assets, and the
@@ -503,10 +561,13 @@ def build_state_dir(root, settings, schedule, blocklist=None):
     (root / "blocklist.json").write_text(
         json.dumps(blocklist if blocklist is not None else DEFAULT_BLOCKLIST, indent=2))
 
-    skill = root / "skills" / "demo-skill"
-    skill.mkdir(parents=True, exist_ok=True)
-    (skill / "SKILL.md").write_text("# demo skill\n")
-    (skill / "tool.mjs").write_text("export default {}\n")
+    for slug, entry in DEFAULT_SKILLS.items():
+        directory = root / "skills" / slug
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "SKILL.md").write_text(
+            "---\nname: %s\nlabel: %s\ncooldown: %s\n---\n\n%s\n"
+            % (slug, entry["label"], entry["cooldown"], entry["brief"]))
+    (root / "skills" / "demo-skill" / "tool.mjs").write_text("export default {}\n")
 
     for name in ("sfx", "jingles", "beds"):
         directory = root / name

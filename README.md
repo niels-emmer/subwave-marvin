@@ -1,157 +1,150 @@
 # subwave-marvin
 
-An agent-agnostic toolkit for running a self-hosted **SUB/WAVE** radio station from an agent session.
-One Icecast stream, so everyone hears the same track at the same moment; the DJ picks from your own
-Navidrome library and talks between tracks. You describe the station in files, review the diff, and push
-it — or ask an agent to do it for you.
+An agent-agnostic toolkit for running a self-hosted **SUB/WAVE** radio station from an agent session. One
+Icecast stream, so everyone hears the same track at once; the DJ picks from your own Navidrome library and
+talks between tracks. You describe the station in files, review the diff, and apply it — or ask an agent to.
 
 ## Requirements
 
-- `python3` — standard library only, no dependencies, no virtualenv
-- A running SUB/WAVE station
-- Its admin credentials (`ADMIN_USER` / `ADMIN_PASS`)
+`python3` (standard library only, no dependencies, no virtualenv), a running SUB/WAVE station, and that
+station's admin credentials.
 
 ## Two tiers
-
-Everything works against the HTTP API. With host access it also reads the station's own state files,
-which is where full fidelity lives.
 
 |  | Tier 1: HTTP only | Tier 2: host access |
 | --- | --- | --- |
 | Needs | base URL + admin credentials | also ssh and `docker exec` |
 | Read personas and shows | trimmed | full |
 | Read the grid | yes | yes |
-| Create / update | only from a complete capture | yes |
-| Backup | without the schedule | complete |
+| Backup | **without the schedule** | complete |
 
-Every command prints the tier it is running at. A tier-1 `pull` is always lossy — the API hides fields —
-so `validate` fails and `apply` refuses. Host access is needed once, to take a complete capture; after
-that, writing from it works at either tier.
+Tier 1 cannot read full show definitions — the API returns 7 of a show's 26 fields — and it cannot take a
+complete backup, because the station's own export omits the schedule. Both need tier 2. Every command
+prints the tier it is running at.
+
+## Setup
+
+```sh
+cp .env.example .env
+```
+
+Six variables, read from `.env` or the environment:
+
+| Variable | |
+| --- | --- |
+| `SUBWAVE_BASE_URL` | the station's admin API, e.g. `http://127.0.0.1:7700`; a tunnel is fine |
+| `SUBWAVE_ADMIN_USER` | the station's `ADMIN_USER` |
+| `SUBWAVE_ADMIN_PASS` | the station's `ADMIN_PASS` |
+| `SUBWAVE_STATION_PASSWORD` | the listener password (`settings.privacy.password`) |
+| `SUBWAVE_HOST` | tier 2: the ssh host |
+| `SUBWAVE_STATE_DIR` | tier 2: the state dir **inside the controller container**, e.g. `/var/sub-wave` |
 
 ## Quickstart
 
 ```sh
-cp .env.example .env     # base URL, admin credentials, station password
-# tier 2 only: also set SUBWAVE_HOST and SUBWAVE_STATE_DIR
-python3 scripts/subwave.py status
+python3 scripts/subwave.py pull              # wrote instance/ (N files + ids.lock.json)
+# edit a file under instance/, or use a command from Authoring below
+python3 scripts/subwave.py validate          # result ok (N personas, N shows, N/N cells), 0 warning(s)
+python3 scripts/subwave.py apply             # dry run: N step(s) prepared, 0 requests sent
+python3 scripts/subwave.py apply --yes       # N step(s) written; ids.lock.json updated
 ```
 
-`instance/` holds your station's data and is gitignored. `examples/demo/` is a fictional station in the
-same shape, so you can try the whole flow without a station:
+`apply` prints every step before it writes, and sends nothing until `--yes`.
 
-```sh
-python3 scripts/subwave.py character init --from demo
-python3 scripts/subwave.py validate --dir instance
-```
+## Commands
 
-## Reading the station
+### Reading
 
-| Command | |
-| --- | --- |
-| `status` | tier, station, what is on air, and whether the repo is in sync |
-| `pull [--force] [--allow-lossy]` | capture the station into `instance/`; `--force` replaces an existing capture, `--allow-lossy` accepts a partial tier-1 one |
-| `diff` | drift between `instance/` and the station; exit 1 when it differs |
-| `validate [--dir DIR]` | check a capture before applying it; `--dir` points at another station directory |
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `status` | tier, station, what is on air, repo sync | `status` |
+| `pull` | capture the station into `instance/` | `pull --force` |
+| `diff` | drift vs the station; exit 1 when it differs | `diff` |
+| `validate` | check a capture before applying | `validate --dir examples/demo` |
 
-## Authoring, offline
+`--force` replaces a capture, `--allow-lossy` accepts a partial tier-1 one, `--dir` points elsewhere.
 
-These edit files only. They never touch the network.
+### Writing
 
-| Command | |
-| --- | --- |
-| `character init [--from demo\|blank] [--force]` | create the character layer |
-| `character new-persona <slug> [--name NAME]` | a persona with all 18 fields |
-| `character new-show <slug> [--name NAME] [--persona SLUG]` | a show with all 26 fields |
-| `character add-to-grid <slug> --days mon,tue --from 9 --to 12 [--replace] [--clear]` | fill grid cells; `--clear` empties them instead |
-| `character edit-persona <slug> --set FIELD=VALUE [--force-value]` | change named fields only |
-| `character edit-show <slug> --set FIELD=VALUE [--force-value]` | the same for a show |
-| `blocklist list \| block \| unblock \| rm \| rule add\|edit` | bans and rules; `block --type {artist,album,track} --id ID` |
-| `skills list \| new <slug> \| show <slug> \| edit <slug> \| rm <slug>` | the DJ's segments |
+`apply` dry-runs by default and prints each step; `--yes` performs the writes. `--force-now` writes while a
+show is on air; `--no-backup` skips the pre-apply backup and `--backup-dir` moves it. `--prune` deletes entities on the station but not in the repo; `--force-prune` allows that when something depends on them.
 
-`--force-value` accepts a value outside the known vocabulary with a loud warning, for a station newer
-than the toolkit. A typo is still refused, because it would reach the station.
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `apply` | push the capture to the station | `apply` then `apply --yes` |
 
-## Applying
+### Safety net
 
-`apply` pushes the capture to the station. **It is a dry run unless you pass `--yes`.**
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `backup` | config, assets and blocklist, plus a `RESTORE.md` | `backup --dir ~/backups` |
+| `restore` | put a backup back: state files, then assets | `restore <dir> --yes` |
 
-| Flag | |
-| --- | --- |
-| `--yes` | perform the writes |
-| `--dry-run` | explicit dry run, which is already the default |
-| `--force-now` | write even while a show is on air |
-| `--no-backup` | write without taking a backup first |
-| `--backup-dir DIR` | where that backup goes |
-| `--prune` | also delete entities that exist on the station but not in the repo |
-| `--force-prune` | delete even when a grid cell or a hosted show depends on it |
+`--with-library` adds `library.db`, which is large and rebuildable, so it is skipped by default.
 
-## Backup and restore
+### Authoring — local file edits, no network
 
-```sh
-python3 scripts/subwave.py backup [--dir DIR] [--with-library]
-python3 scripts/subwave.py restore <directory> [--yes] [--force-now]
-```
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `character init` | create the character layer | `character init --from demo` |
+| `character new-persona` / `new-show` | a persona (18 fields) or a show (26) | `character new-show <slug> --persona <persona>` |
+| `character add-to-grid` | fill grid cells, or `--clear` them | `character add-to-grid <show> --days mon --from 9 --to 12` |
+| `character edit-persona` / `edit-show` | change named fields only | `character edit-persona <persona> --set warmth=8` |
+| `skills` | the DJ's own segments | `skills new late-shift`, `skills edit <slug> --brief "..."` |
+| `blocklist` | bans | `blocklist block --type artist --id <id>` |
+| `blocklist rule` | rules | `blocklist rule add --label "No opera" --field genre --value Opera` |
 
-`backup` copies the config, the assets and the blocklist, and writes a `RESTORE.md` saying where each
-file goes back. `--with-library` adds `library.db`, which is audio analysis: large, and expensive to
-rebuild, so it is skipped by default.
+`character init` takes `--from demo|blank` and `--force`; `add-to-grid` takes `--replace` to take over
+occupied cells; `edit-*` take `--force-value` for a value this toolkit does not know. `skills` also has
+`list`/`show`/`rm`; `blocklist` also has `list`/`unblock`/`rm`; `rule` also has `edit`.
 
-## On air
+### On air — imperative, immediate
 
-`onair` talks to the station's MCP server to change what is happening **now**. It is the one imperative
-surface: nothing it does is captured, diffed, applied or committed. Every verb that changes air needs
-`--yes`; without it the exact call is printed and nothing is sent.
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `onair tools` / `now` / `state` | the catalogue, what is on air, the queue and history | `onair now` |
+| `onair say` | have the DJ speak (`--raw`, `--over-track`, `--sfx`) | `onair say "Back after this." --yes` |
+| `onair segment` | run a programmed segment | `onair segment hourly --yes` |
+| `onair skip` | skip the current track (`--expect-id`, `--any-track`) | `onair skip --expect-id <id> --yes` |
+| `onair request` | request a song, then report the outcome | `onair request "something like Portishead" --yes` |
+| `onair queue` | search, then queue a result | `onair queue portishead --yes --pick 2` |
+| `onair sfx` / `onair jingle` | play one | `onair sfx airhorn --yes` |
+| `onair list` | skills, sfx or jingles | `onair list skills` |
 
-| Command | |
-| --- | --- |
-| `onair tools \| now \| state \| list {skills,sfx,jingles}` | read-only |
-| `onair say <text> [--raw] [--over-track] [--sfx NAME]` | have the DJ speak |
-| `onair segment <type>` | run a programmed segment |
-| `onair skip [--expect-id ID] [--any-track]` | skip; needs one of those flags, because a skip has no undo |
-| `onair request <text>` | request a song, then report the outcome |
-| `onair queue <terms> [--pick N]` | search, then queue a result |
-| `onair sfx <name>` / `onair jingle <file>` | play one |
 
-## What protects you
+## Declarative vs imperative
 
-The station is live, so the defaults are cautious:
+Everything except `onair` describes the station: it is captured, diffed, validated and applied
+deliberately. `onair` changes the broadcast now — it is never part of `apply` or `diff`, nothing it does
+is captured, and nothing it does enters git.
 
-- **`apply` is a dry run** until `--yes`, and prints every step first.
-- **`validate` runs before any write** and refuses on an error. A typo'd field is silently dropped by
-  the station's shallow merge, so validation is what catches it.
-- **Every write is read back.** If a field did not land, `apply` fails loudly and names it.
-- **A lossy capture is refused**, because pushing trimmed shows back would strip the fields the API hid.
-- **Secrets never print.** `pull` redacts them; the post-apply check names a secret path but never shows
-  its value.
-- **`--prune` is opt-in and refuses by default** when something depends on the entity: a show in a grid
-  cell, a persona hosting a show. The active persona, the last persona and the last show cannot be
-  deleted at all. A backup is mandatory, and prune runs only after the writes have verified.
-- **`onair skip` needs `--expect-id` or `--any-track`**, and a 401 tells you which credential is missing.
+## Safety model
+
+- **A lossy capture is refused** — pushing trimmed shows back would strip the fields the API hid.
+- **A payload holding a redaction placeholder is refused**, so a credential is never overwritten with it.
+- **Writing while a show is on air is refused** unless `--force-now`.
+- **A backup is mandatory before writes and before any prune** — a delete has no undo.
+- **Prune refuses anything with dependents**, and never deletes the active or last persona, or last show.
+- **Every air-changing verb needs `--yes`**; `skip` also needs `--expect-id` or `--any-track`.
+- **`validate` runs before any write, and every write is read back** — a field that did not land is named.
+
+## What it does not do
+
+- **Avatars and imaging media** — binary; `backup` covers them, authoring does not.
+- **Library operations** — tagging, playlist building, analysis. That is Navidrome's and the station's job.
+- **Anything that bypasses the station's `tool.mjs` trust boundary** — tool code stays quarantined until a
+  human reviews it and trusts its sha256.
 
 ## Layout
 
 ```
-instance/            your station, gitignored
-  settings.json        station config, secrets redacted
-  blocklist.json       bans and rules
-  skills/<slug>/       the DJ's segments
-  character/           identity, personas, shows, the grid
-skills/              agent procedures — how an agent works this repo
-examples/demo/       a fictional station in the same shape
-scripts/subwave.py   the whole tool
+instance/          your station — gitignored; character/ holds identity, personas,
+                   shows and the grid, skills/<slug>/ the station's own DJ segments
+skills/            agent procedures — how an agent works this repo
+examples/demo/     a committed fictional station, same shape as instance/
+scripts/subwave.py the whole tool
 ```
 
-`instance/skills/` holds **station** skills, the DJ's segments. `skills/` at the root holds **agent**
-procedures. They are different things.
+## Where to read more
 
-## Docs
-
-- `AGENTS.md` — what an agent needs to know first
-- `docs/PLAN.md` — design, phases, what is not built yet
-- `docs/decision-log.md` — why things are the way they are
-- `docs/applied.md` — the on-air audit trail
-
-## Contributing
-
-Run `python3 -m unittest discover -s tests` before you commit; the suite is offline and uses a mock
-station. `sh scripts/check-secrets.sh` blocks credentials from entering a commit.
+`AGENTS.md` for agents · `docs/PLAN.md` design · `docs/decision-log.md` why · `docs/applied.md` what aired.

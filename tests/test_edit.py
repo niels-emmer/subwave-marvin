@@ -162,20 +162,47 @@ class TypeTests(EditTestCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(self.read("personas", "ivo-marsh")["frequency"], "moderate")
 
-    def test_mood_vocabulary_is_enforced(self):
-        before = self.show_path().read_text()
+    def test_full_persona_vocabularies_are_accepted(self):
+        for field, value in (("frequency", "aggressive"), ("scriptLength", "extended"),
+                             ("linkStyle", "announce")):
+            code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                        "--set", "%s=%s" % (field, value))
+            self.assertEqual(code, 0, "%s=%s: %s" % (field, value, output))
+            self.assertEqual(self.read("personas", "ivo-marsh")[field], value)
+
+    def test_the_ladder_order_is_preserved(self):
+        # Sourced from upstream controller/src/schemas/persona.ts and show.ts.
+        # Order matters: settings/persona.ts bumps one rung with indexOf().
+        self.assertEqual(subwave.PERSONA_ENUMS["frequency"],
+                         ("silent", "quiet", "moderate", "chatty", "aggressive"))
+        self.assertEqual(subwave.PERSONA_ENUMS["scriptLength"],
+                         ("one-liner", "concise", "extended", "storyteller"))
+        self.assertEqual(subwave.PERSONA_ENUMS["linkStyle"], ("natural", "announce"))
+        self.assertEqual(subwave.SHOW_ENUMS["energies"], ("low", "medium", "high"))
+        self.assertEqual(subwave.SHOW_ENUMS["vocals"], ("", "instrumental", "vocal"))
+        self.assertNotIn("moods", subwave.SHOW_ENUMS,
+                         "moods is station-supplied, not a fixed enum")
+
+    def test_moods_are_free_form_because_the_station_supplies_them(self):
+        # Upstream validates moods against the station's installed mood names
+        # (showStringList values: ctx.moodNames), which this toolkit cannot read,
+        # so an unknown mood must be accepted rather than blocked.
         code, output = self.run_cli("character", "edit-show", "first-light",
                                     "--set", "moods=night,sleepy")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.read("shows", "first-light")["moods"], ["night", "sleepy"])
+
+    def test_vocals_accepts_only_the_station_set(self):
+        code, output = self.run_cli("character", "edit-show", "first-light",
+                                    "--set", "vocals=shouty")
         self.assertEqual(code, 1, output)
         self.assertIn("must be one of", output)
-        self.assertIn("sleepy", output)
-        self.assertIn("reflective", output)
-        self.assertEqual(self.show_path().read_text(), before)
+        self.assertIn("instrumental", output)
 
         code, output = self.run_cli("character", "edit-show", "first-light",
-                                    "--set", "moods=night,reflective")
+                                    "--set", "vocals=instrumental")
         self.assertEqual(code, 0, output)
-        self.assertEqual(self.read("shows", "first-light")["moods"], ["night", "reflective"])
+        self.assertEqual(self.read("shows", "first-light")["vocals"], "instrumental")
 
     def test_energy_vocabulary_is_enforced(self):
         code, output = self.run_cli("character", "edit-show", "first-light",
@@ -195,6 +222,44 @@ class TypeTests(EditTestCase):
 
 
 class RefusalTests(EditTestCase):
+    def test_a_typo_is_still_rejected_with_the_allowed_set(self):
+        before = self.persona_path().read_text()
+        code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                    "--set", "frequency=shouty")
+        self.assertEqual(code, 1, output)
+        self.assertIn("must be one of", output)
+        for value in ("silent", "quiet", "moderate", "chatty", "aggressive"):
+            self.assertIn(value, output)
+        self.assertEqual(self.persona_path().read_text(), before)
+
+    def test_force_value_allows_an_unknown_value_with_a_warning(self):
+        code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                    "--set", "frequency=shouty", "--force-value")
+        self.assertEqual(code, 0, output)
+        self.assertIn("warning", output)
+        self.assertIn("outside the known vocabulary", output)
+        self.assertIn("shouty", output)
+        self.assertEqual(self.read("personas", "ivo-marsh")["frequency"], "shouty")
+        self.assert_valid()
+
+    def test_force_value_also_covers_enum_lists(self):
+        code, output = self.run_cli("character", "edit-show", "first-light",
+                                    "--set", "energies=frantic", "--force-value")
+        self.assertEqual(code, 0, output)
+        self.assertIn("warning", output)
+        self.assertEqual(self.read("shows", "first-light")["energies"], ["frantic"])
+
+    def test_force_value_does_not_relax_booleans_or_integers(self):
+        code, output = self.run_cli("character", "edit-show", "first-light",
+                                    "--set", "banter=yes", "--force-value")
+        self.assertEqual(code, 1, output)
+        self.assertIn("boolean", output)
+
+        code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                    "--set", "warmth=warm", "--force-value")
+        self.assertEqual(code, 1, output)
+        self.assertIn("integer", output)
+
     def test_unknown_field_is_rejected_with_the_fields_that_exist(self):
         code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
                                     "--set", "warmthh=8")

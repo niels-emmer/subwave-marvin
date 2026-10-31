@@ -106,8 +106,10 @@ every show and the whole grid do not. So `backup` copies the config **and** thos
 - **`character edit-persona` / `edit-show` change only the fields you name**, leave every other field's
   value and position alone, and never touch an `id` or a slug. They refuse an unknown field (listing the
   real ones) and a wrong type or enum rather than coercing it, and restore the file if the result would
-  fail `validate`. Values are checked at edit time; `validate` itself stays permissive about a value a
-  newer server may know.
+  fail `validate`. Enum sets are copied from upstream (`controller/src/schemas/persona.ts` and
+  `show.ts`) in the product's ladder order, not inferred from the demo; `--force-value` lets a value this
+  tool does not know through with a loud warning, for a station newer than the toolkit. Values are
+  checked at edit time; `validate` itself stays permissive about a value a newer server may know.
 - **`apply` refuses a lossy capture.** `pull` records `capture.lossy` in `ids.lock.json`; a
   tier-1 `--allow-lossy` pull sets it, and `apply` then refuses outright, because pushing 7-field
   shows back would strip 19 fields per show. This is a safety property, not a warning: do not relax it.

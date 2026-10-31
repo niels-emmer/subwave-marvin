@@ -1,0 +1,44 @@
+name: Feature request
+description: Suggest an idea for this project
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a small toolkit with one job — operate a SUB/WAVE station from an agent
+        session. Features that add runtime dependencies or that turn the toolkit into a
+        general-purpose station admin are unlikely to be accepted; please explain the
+        problem first.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the problem, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Which tier would this need?
+      options:
+        - Works at tier 1 (HTTP only)
+        - Needs tier 2 (host access) but degrades honestly without it
+        - Tier 2 only
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

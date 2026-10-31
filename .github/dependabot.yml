@@ -1,0 +1,9 @@
+version: 2
+updates:
+  # The toolkit has no runtime dependencies beyond the Python standard library, so
+  # there is no pip ecosystem to watch. Actions are the only moving parts.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

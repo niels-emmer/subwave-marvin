@@ -1,5 +1,8 @@
 # subwave-marvin
 
+[![CI](https://github.com/niels-emmer/subwave-marvin/actions/workflows/ci.yml/badge.svg)](https://github.com/niels-emmer/subwave-marvin/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 You run a SUB/WAVE station. This lets you look after it by talking to your agent instead of clicking
 through the admin console. Your station's settings live as files in a git repo, so you can see what
 changed, undo it, and keep a history of how the station got to sound the way it does.

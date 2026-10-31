@@ -1,396 +1,183 @@
 # PLAN — subwave-marvin
 
-Implementation plan for making the **Marv's Tunes** SUB/WAVE station programmable from git: personas, station
-settings, shows and the weekly schedule defined in this repo, pulled from and pushed to the live instance.
+A toolkit for operating any **SUB/WAVE** radio station from an agent session. It is not one station's
+config: the repo is public-facing and agent-agnostic, and a deployment's real data lives in a gitignored
+`instance/`.
 
-Status: plan only. Nothing here is implemented yet; no live config has been modified.
+Status: **P0 done** (this deployment captured). The tool itself is P1. Nothing has been applied to a
+live station by this repo.
 
 ---
 
-## 1. Verified current state (2026-10-31)
+## 1. The two constraints
 
-Read from `/var/sub-wave/settings.json` and `/var/sub-wave/schedule.json` via
-`ssh homeserver 'docker exec sub-wave-controller cat …'`.
+**C1 — the repo will be public.** Every instance-specific fact and all PII live in gitignored files, with
+anonymised `.example` equivalents committed. That includes station identity, hostnames, credentials,
+persona and show definitions, and any themed character content.
 
-| Area | Live value |
+**C2 — agent-agnostic.** Clone into Claude Code, Codex, OpenCode or anything else that reads `AGENTS.md`
+and chat to your own station. No tool-specific assumptions; skills, scripts and docs must work for any
+agent and any install.
+
+## 2. The finding that shapes the design
+
+The documented API is not the config API. Verified against a live station:
+
+| Endpoint | Actually returns |
 | --- | --- |
-| Station | "Marv's Tunes"; description "Brain the size of a Universe, here I am picking songs for meatbags."; `timezone` Europe/Amsterdam; `locale` en-GB; `theme.active` classic-dark |
-| LLM | `anthropic` / `claude-haiku-4-5`; trackSelection `agentic`; requestMatching `agentic`; noRepeatWindow 250; artistVarietyWindow 5; `dailyTokenCap` 0 |
-| TTS | enabled; kokoro; per-persona voices `bm_lewis` / `bm_daniel` / `bm_george` |
-| Privacy | `privatePlayer` true, **`listenerAuth` false**, `publishPersonaSouls` false, `password` set (23 chars) |
-| Stream | **`maxListeners` 100**, bitrate 192, flac true, bufferSeconds 22, idleWhenEmpty true, opus/aac disabled |
-| Requests | enabled; maxPending 6; perIpHourlyCap 8; globalHourlyCap 30; cooldownSec 60; repeatCooldownMin 120; onePendingPerIp true |
-| Skills | 12 `SKILL.md` on host; enabled: commute-check-in, dystopian-update, good-news, news-briefing, philocrisis |
-| Personas | 4 — Marvin `p_389727`, Zaphod Beeblebrox `p_9de2cf`, Arthur Dent `p_f01623`, Ford Prefect `p_7c487e`; souls 1.2–1.3 KB |
-| Shows | 6 — Thank You-Know-Who It's Friday `s_747743`, Friday Drive `s_d33a46`, Sunrise Service `s_560bdd`, Late Feels `s_01ee08`, Working Day Vibes `s_82943d`, Weekend Daylight Blend `s_e43bd6` |
-| DJ prompts | `djPrompt`, `djPrompts`, `djHouseRules` all **empty** |
-| Grid | Sun/Sat: Sunrise 00–06, Weekend Daylight 07–22, Late Feels 23; Mon–Thu: Sunrise 00–06, Working Day 07–22, Late Feels 23; Fri: Thank You-Know-Who 00–17, Friday Drive 18–23 |
-| Hosting | Marvin hosts 5 of 6 shows; Ford hosts Weekend Daylight Blend |
+| `GET /api/personas` | 4 fields per persona (`id, name, tagline, avatar`) — even with admin auth |
+| `GET /api/schedule` | the grid, plus shows cut to **7 of 26** fields |
+| `GET /api/settings` (admin) | a **19-key UI summary**, not the 52-key `settings.json` |
+| `GET /api/connect/openapi.json` | curated subset, auth required, **no config writes** |
+| `GET /api/backup/export` | ~95 MB zip, **no `schedule.json`** |
+| `GET /shows` | **does not exist** |
 
-One consequence worth stating up front: with `listenerAuth` off the controller **fails open**
-(`controller/src/util/listener-auth.ts`, `listenerAuthDecision()`), which is exactly why `/stream.mp3` is reachable
-today despite `privatePlayer: true`. See §8.1 for the fix and §12 Q2 for the resolved mechanics.
+So full show definitions are unreadable over HTTP at all. Only the host filesystem has them. Every design
+decision below follows from that.
 
-## 2. The constraint that shapes the design
+## 3. Two capability tiers
 
-The documented API is not the config API. Verified:
+| | Tier 1: HTTP only | Tier 2: host access |
+| --- | --- | --- |
+| Needs | `SUBWAVE_BASE_URL` + admin credentials | + `SUBWAVE_HOST`, `SUBWAVE_STATE_DIR`, ssh, `docker exec` |
+| Create / update | yes | yes |
+| Read personas | trimmed (4 fields) | full |
+| Read shows | trimmed (7 of 26) | full |
+| Read the grid | yes | yes |
+| Backup | zip only — **no schedule** | zip **+ `schedule.json`** |
+| Portable | yes | no (needs host access) |
 
-- `GET /api/personas` returns 4 fields per persona (`id, name, tagline, avatar`) — even with admin auth.
-- `GET /api/schedule` returns the grid plus shows cut down to 7 of their 26 fields.
-- `GET /api/settings` (admin) returns a 19-key UI summary (`onAir`, `pickerBusy`, `defaults`, …) — **not** `settings.json`.
-- `GET /api/connect/openapi.json` is a curated 33-path subset with no config writes.
-- `GET /api/backup/export` is a ~99 MB gzip blob (library included) — unusable for config sync.
+Two rules the tool must honour:
 
-**Therefore the tool has two asymmetric halves: reads from root-owned state files via `docker exec`; writes via
-the admin HTTP API.** Any design that tries to round-trip config through the read endpoints will silently
-truncate personas and shows. This is the single most important thing in this plan.
+1. **Announce the tier.** `status` prints which tier it is at and what that costs. Never degrade silently.
+2. **Never read-modify-write at tier 1.** `apply` builds whole objects from the repo and sends those. A
+   trimmed read merged into a write would silently drop the 19 fields it cannot see.
 
-## 3. Assumptions (explicit)
-
-1. **The repo is the source of truth.** The live station is a deployment target, not the authority. Changes are
-   authored in git, reviewed, then applied.
-2. Three verbs, no magic: `pull` (live → repo), `diff` (read-only drift), `apply` (repo → live). **Never
-   auto-apply.** No cron, no daemon, no post-commit hook that writes to the station.
-3. `apply` is idempotent: applying twice changes nothing the second time.
-4. **Secrets never enter the repo.** `pull` redacts on the way in; `apply` re-injects live values at the moment
-   of writing (secret-preserving merge, §5.4).
-5. **Python 3.14 stdlib only** (`urllib`, `json`, `subprocess`, `unittest`). Python 3.14.6 is available. No
-   `jsonschema`, no `requests`, no third-party deps — the validator is ~150 lines of explicit code (§6).
-   Node 26 / Bun 1.4 are available but are not used: one language, zero install step.
-6. **A slug→server-id lockfile is mandatory.** Server ids are generated (`p_xxxxxx`, `s_xxxxxx`); the lockfile is
-   what makes renames safe and prevents duplicate personas/shows.
-7. **Publishing: local commits only.** No push, no PR for this work.
-8. The human runs `apply`. The agent may prepare, dry-run, and report.
-
-## 4. Repo layout
+## 4. Target layout
 
 ```
-AGENTS.md
-docs/PLAN.md
-docs/apply-log/                 # one JSON per applied change (hashes, no secrets)
-config/
-  settings.json                 # whole settings doc, secrets replaced by "__REDACTED__"
-  personas/<slug>.json          # one complete persona object per file
-  shows/<slug>.json             # one complete show object per file
-  schedule.json                 # {"grid": {"0": ["<slug>", …24]}, "override": null}
-  skills/<slug>/SKILL.md        # captured from the host
-  schema/fields.json            # field spec: types, enums, ranges, required sets
-  schema/vocab.json             # captured vocabularies: moods, energies, vocals, linkStyle…
-  ids.lock.json                 # slug -> server id, generated
-deploy/
-  compose.yaml                  # from /home/zaph0d/macjuu/stacks/subwave
-  env.example                   # keys only, values blank
-  README.md                     # how to bring the stack up on a fresh host
-tools/
-  subwave.py                    # CLI entry point
-  sw_state.py                   # state-dir reads over ssh/docker exec
-  sw_api.py                     # admin API client (urllib, Basic auth)
-  sw_config.py                  # repo <-> live model: slugs, ids, redaction, merge
-  schema.py                     # validator
-tests/
-  fixtures/2026-10-31/          # redacted snapshot: settings, schedule
-  test_pull.py test_schema.py test_apply_payloads.py test_redaction.py
+AGENTS.md                 agent-agnostic, zero instance facts
+README.md
+.env.example              SUBWAVE_BASE_URL, _ADMIN_USER, _ADMIN_PASS, _STATION_PASSWORD,
+                          _HOST (tier 2), _STATE_DIR (tier 2)
+.gitignore                ignores instance/ and .env
+scripts/subwave.py        the tool                                    (P1)
+skills/<name>/SKILL.md    agent skills                               (P4)
+examples/demo/            committed fictional station, same shape as instance/
+instance/                 GITIGNORED — this deployment
+  settings.json
+  character/character.json
+  character/personas/*.json
+  character/shows/*.json
+  character/schedule.json
+docs/{PLAN,decision-log,applied}.md
 ```
 
-Why one file per persona/show: it makes diffs reviewable ("what changed about Arthur?") and rename-safe (the
-filename is the slug, the `id` inside is the link). Why the grid stores slugs and not ids: a grid of `s_xxxxxx`
-is unreadable in review, and ids change on a rebuild of the station.
+## 5. The character layer
 
-## 5. Sync tool design
+A **character** is the themed bundle that makes a station itself, and it is pluggable: swap the directory
+and you have a different station on the same software.
 
-### 5.1 Connection model
+| File | Holds | Server field it maps to |
+| --- | --- | --- |
+| `character/character.json` | `name`, `description`, `locale`, `timezone`, `theme`, `houseRules` | `station`, `stationDescription`, `locale`, `timezone`, `theme.active`, `djHouseRules` |
+| `character/personas/*.json` | one persona per file (18 fields, `soul` is the system prompt) | `settings.personas[]` |
+| `character/shows/*.json` | one show per file (26 fields) | `schedule.shows[]` |
+| `character/schedule.json` | `{schedule, override}` — the 7×24 grid by slug | `schedule.schedule`, `schedule.override` |
 
-```sh
-# reads: root-owned files, via the controller container
-ssh homeserver 'docker exec sub-wave-controller cat /var/sub-wave/settings.json'
+The split is a repo convenience: the server keeps personas inside `settings.json` and shows inside
+`schedule.json`. `pull` splits them out; `apply` reassembles them.
 
-# writes: admin API through a tunnel; 7701 is container-internal, so tunnel 7700
-ssh -N -L 17700:localhost:7700 homeserver &
-tools/subwave.py apply --dry-run --base-url http://127.0.0.1:17700
-```
+`examples/demo/` is a committed fictional station in exactly this shape (invented hosts, placeholder ids),
+so the repo is testable with no live station and no instance data.
 
-Credentials come from the environment, never argv (argv is world-readable in `ps`):
-
-```sh
-export SUBWAVE_ADMIN_USER=...   SUBWAVE_ADMIN_PASS=...
-# or, on macOS, straight from the Keychain:
-export SUBWAVE_ADMIN_PASS="$(security find-generic-password -s subwave-admin -w)"
-```
-
-### 5.2 `pull` — live → repo
-
-1. Read `settings.json`, `schedule.json`, and every `skills/*/SKILL.md` via `docker exec`.
-2. Redact secret paths (§5.5) to `"__REDACTED__"`.
-3. Split: `personas[]` → `config/personas/<slug>.json` (slug from `name`); `shows[]` → `config/shows/<slug>.json`;
-   everything else → `config/settings.json`; grid ids → slugs via the lockfile.
-4. Regenerate `ids.lock.json`.
-5. Refuse to write if any live secret value survives redaction (a substring check of the output against the live
-   secret values) — a redaction bug must fail loudly, not leak.
-
-`pull --check` writes nothing and exits non-zero when the repo already matches.
-
-### 5.3 `diff` — read-only drift report
-
-Compares repo-desired against live-actual, per section and per entity, and prints a unified diff of the JSON.
-Ignores redacted paths and a small allowlist of server-normalized fields (populated during Phase 1 by observing
-what a no-op round trip changes). `--exit-code` for scripting. `diff` never needs credentials for the read half
-and never writes.
-
-### 5.4 `apply` — repo → live
-
-Order matters, because shows reference personas and the grid references shows:
-
-1. **Preflight.** `GET /api/health`; `GET /api/now-playing`; print current show and listener count. Refuse when
-   `--require-off-air` and the station is on air. Print a summary of every pending change and require `--yes`.
-2. **Read live** `settings.json` + `schedule.json` (same path as `pull`).
-3. **Build desired** documents, resolving slugs → ids through `ids.lock.json`.
-4. **Secret-preserving merge.** For each top-level section that contains a redacted path, take the live value at
-   that path and the repo value everywhere else. This is what lets us flip `privacy.listenerAuth` without
-   clobbering `privacy.password` under a shallow merge.
-5. **Write, one section at a time**, verifying after each:
-   | Step | Call | Why this order |
-   | --- | --- | --- |
-   | 1 | `POST /api/settings` `{"personas":[…], "activePersonaId":…}` | shows point at persona ids |
-   | 2 | `POST /api/shows` `{"show":{…}}` per changed show | upsert by `show.id` from the lockfile |
-   | 3 | `POST /api/settings` one section per call (`stream`, `privacy`, `requests`, `djHouseRules`, `skills`, …) | smallest possible blast radius per call |
-   | 4 | `PUT /api/schedule` with all 7×24 cells | whole-grid replace; do it last |
-6. **Confirm.** Re-read state and diff against the intended result; abort on mismatch and report which step.
-7. **Audit.** Write `docs/apply-log/<UTC timestamp>.json`: sections touched, before/after SHA-256 of the redacted
-   documents, ids created. No secrets, no souls, no listener data.
-
-Never in scope for `apply`: deletes. `DELETE /api/shows/:id` and `DELETE /api/personas/:id` are separate,
-explicit, human-only verbs (`subwave.py delete-show <slug> --yes`). `--prune` is deliberately not implemented in
-v1.
-
-### 5.5 Redaction and secrets
-
-Secret paths inside `settings.json` (all confirmed present):
+## 6. The tool
 
 ```
-privacy.password
-llm.apiKey                     llm.fallback.apiKey
-tts.cloud.apiKey               tts.cloud.compatApiKey
-search.apiKey                  embedding.apiKey
-scrobble.lastfm.apiKey         scrobble.lastfm.apiSecret    scrobble.lastfm.sessionKey
-scrobble.listenbrainz.userToken
+scripts/subwave.py status            # tier, station, on-air state, what this tier can and cannot do
+scripts/subwave.py pull [--check]    # live -> instance/ (secrets redacted)
+scripts/subwave.py diff              # read-only drift report
+scripts/subwave.py apply [--dry-run] # repo -> live, whole objects only
+scripts/subwave.py backup <dir>      # tier 2 includes schedule.json; tier 1 refuses
 ```
 
-Rules:
+- **`pull`** reads `settings.json` + `schedule.json` from the host (tier 2) or the trimmed API (tier 1,
+  and says what it could not read). Redacts secret paths to `"__REDACTED__"`, splits personas and shows
+  into per-slug files, regenerates `ids.lock.json`.
+- **`diff`** compares repo-desired against live, per section and per entity. Never writes.
+- **`apply`** is idempotent and ordered: personas → shows → settings sections → grid last, because shows
+  reference personas and the grid references shows. Secret-preserving merge keeps live credentials when
+  a section containing them is sent. Deletes are never part of `apply`.
+- **`backup`** exists because the built-in export silently loses the programming: tier 2 = zip +
+  `schedule.json`; tier 1 = refuse with the reason, rather than hand back an incomplete backup.
+- **`ids.lock.json`** maps slug → server id (server ids are generated: `p_xxxxxx`, `s_xxxxxx`). It is
+  generated, never hand-edited, and is what keeps a rename from creating a duplicate.
 
-- Redaction is a path allowlist (`config/schema/fields.json` → `"secret": true`), not a regex over values.
-- The sentinel is `"__REDACTED__"`. `apply` **must** refuse to send any payload containing it (§6 validation).
-- `pull` fails closed: if a live secret value appears anywhere in the produced files, abort without writing.
-- `.env` is gitignored; `deploy/env.example` carries key names with empty values.
-- `ANTHROPIC_API_KEY`, `ADMIN_PASS` and the station password live in the host `.env` / macOS Keychain, never here.
+## 7. Schema and validation
 
-### 5.6 `ids.lock.json` — the rename guard
+Python 3 stdlib only — no third-party deps, so the toolkit runs anywhere an agent already is.
 
-```json
-{ "version": 1,
-  "personas": { "marvin": "p_389727", "zaphod-beeblebrox": "p_9de2cf" },
-  "shows":    { "sunrise-service": "s_560bdd", "friday-drive": "s_d33a46" } }
-```
+- `tools/schema.py` + a field spec: required keys per entity, enums for `frequency`, `scriptLength`,
+  `linkStyle`, `vocals`, `moods` (validated against the station's own mood vocabulary), `energies`,
+  numeric ranges for `humour`/`warmth`/`localColour`.
+- Grid: exactly 7 day keys, 24 cells each, every cell resolving to a known show slug.
+- Cross-references: `show.personaId` and `guestPersonaIds` exist; `activePersonaId` exists.
+- **Unknown fields are an error**: a field the server has and we do not model would be deleted on merge.
+- `"__REDACTED__"` is legal in `instance/` and never legal in an apply payload.
 
-Generated by `pull`, never hand-edited, and checked in. Invariants enforced by the validator and by `apply`:
+## 8. Phases
 
-- slug ↔ id is a bijection (no two slugs share an id, no id appears twice).
-- Renaming a file/`name` keeps the id → `POST /api/shows` upserts instead of creating a duplicate.
-- A slug in `config/` with no id, while a live entity of the same name exists, is an error that demands
-  `--adopt <slug>=<id>` — never a silent create.
-- An id in the lockfile that the live station no longer has is reported, not auto-deleted.
-- A live persona/show with no file in `config/` is drift, reported by `diff`, never pruned automatically.
+| Phase | Work | Exit criteria |
+| --- | --- | --- |
+| **P0 — capture** *(done)* | `.gitignore` first, then verbatim `settings.json` + `schedule.json` into `instance/` | instance files parse; 6 shows; 168/168 cells; `git status` and `git ls-files` never mention `instance/` |
+| **P1 — read-only tool** | `status`, `pull`, `diff`, validation, tier detection | `diff` runs at both tiers; tier 1 states what it cannot read; demo validates |
+| **P2 — character authoring** | character layer files, slug↔id lockfile, splitting/reassembly | `pull` round-trips `instance/` byte-identically (modulo redaction) |
+| **P3 — apply** | ordered writes, dry-run, audit row, secret-preserving merge | `apply --dry-run` reviewed; first real apply is one section, off-air, logged in `docs/applied.md` |
+| **P4 — skills** | `skills/<name>/SKILL.md`: new show, diagnose a host, backup, schedule review | an agent completes each task from the skill alone, at the tier it announces |
+| **P5 — public readiness** | scrub, LICENSE, branch protection, repo settings | **human only**; the agent prepares a checklist and changes nothing on GitHub |
 
-### 5.7 CLI surface
+## 9. Verification
 
-```
-subwave.py pull [--check] [--out DIR]
-subwave.py diff [--exit-code]
-subwave.py validate [--strict]
-subwave.py apply [--dry-run] [--yes] [--only settings,personas,shows,schedule] [--require-off-air]
-subwave.py verify
-subwave.py ids
-```
+| Check | How |
+| --- | --- |
+| Model valid | `scripts/subwave.py diff` + schema validation on `instance/` and `examples/demo/` |
+| No instance leak | `sh scripts/check-secrets.sh --all`, plus a scrub grep for hostnames, IPs, ids, character names over **tracked** files |
+| Idempotent | `pull` → `diff` → `pull` is clean; `apply` twice changes nothing |
+| Tier honesty | tier-1 run refuses `backup` and names the missing schedule; no command silently trims |
+| Audit | every apply has a row in `docs/applied.md` and a backup outside the repo |
 
-`--dry-run` prints the exact JSON bodies and the ordered call list, and sends nothing.
+## 10. Secrets and instance data
 
-## 6. Schema and validation
+- Repo: never. `instance/` and `.env` are gitignored; `.env.example` carries key names only.
+- `scripts/check-secrets.sh` (pre-commit + CI) blocks key formats, JSON secret keys, and live values from
+  `SUBWAVE_ADMIN_PASS` / `SUBWAVE_STATION_PASSWORD` / `ANTHROPIC_API_KEY` when set.
+- `pull` redacts secret paths on the way in (`privacy.password`, `llm.apiKey`, `llm.fallback.apiKey`,
+  `tts.cloud.*`, `search.apiKey`, `embedding.apiKey`, `scrobble.*`); `apply` re-hydrates from the
+  environment at write time.
+- The station password is `settings.privacy.password` — instance data, never tracked.
 
-No third-party validator. `tools/schema.py` reads `config/schema/fields.json` and enforces, per entity:
+## 11. Our deployment
 
-- **Persona (18 fields):** `id, name, tagline, frequency, scriptLength, djMode, linkStyle, humour, localColour,
-  warmth, soul, musicLean, language, voiceStyle, avatar, tts{engine,cloudProvider,voice,gainDb,speed}, skills[],
-  tags[]`. Required: all of them — a partial persona is data loss, because `POST /api/settings` replaces the whole
-  `personas` array. Enums: `frequency` (moderate|aggressive|chatty|…), `scriptLength` (concise|extended|…),
-  `linkStyle` (storyteller|…), captured from live into `vocab.json`. Ranges: `humour`/`warmth`/`localColour` 0–10.
-  `soul` length 200–6000 chars and must contain an `IDENTITY` section.
-- **Show (26 fields):** `id, name, topic, personaId, guestPersonaIds[], banter, pauseTalk, programme,
-  segmentSkill, preparationSkill, moods[], themeId, genres[], energies[], eras[{fromYear,toYear}], vocals,
-  filtersStrict, maxTrackSeconds, minTrackLengthSeconds, fadeAtShowEnd, playlistIds[], playlistStrict,
-  playlistExhaust, playlistInOrder, excludedPlaylistIds[], tags[]`.
-- **Grid:** exactly 7 day keys `"0".."6"`, exactly 24 cells each, every cell resolving to a slug in the lockfile.
-- **Cross-references:** `show.personaId` and `guestPersonaIds` exist; `activePersonaId` exists; referenced
-  `skills` exist under `config/skills/`; `themeId` exists (or is the active theme).
-- **No sentinel leakage:** `"__REDACTED__"` is legal only in `config/settings.json`, never in an apply payload.
-- **Unknown fields are an error** (`--strict` default). A field the server has that we do not model means our
-  model would delete it on merge; failing loudly is correct.
+This deployment is captured in `instance/` (gitignored) and is deliberately not described here: no
+station name, host, or character content appears in tracked files. It is the first user of the toolkit,
+not its subject. Station-specific choices — including which persona hosts which show — live in
+`instance/character/` and are reviewed there.
 
-## 7. Phases
+## 12. Open questions
 
-### Phase 0 — Bootstrap the baseline (read-only)
-
-Capture what exists today, before proposing any change, so drift is provable.
-
-- `pull` the live state into `config/` (redacted), capture all 12 `SKILL.md`, copy `compose.yaml` + `.env` **key
-  names** into `deploy/`, and record `tests/fixtures/2026-10-31/`.
-- Add `.gitignore` (`.env`, `*.log`, `docs/apply-log/*.tmp`).
-- Commit: "chore: capture live Marv's Tunes config as baseline".
-
-**Exit criteria:** `subwave.py validate` passes; `subwave.py diff` reports zero drift; `grep -r` for the live
-secret values over `config/` finds nothing.
-
-### Phase 1 — Read-only tooling
-
-`sw_state.py` (ssh + docker exec), `pull`, `diff`, `validate`, `verify`, and the validator. Round-trip study:
-pull → diff → pull again; record which fields the server normalizes into a small allowlist.
-
-**Exit criteria:** `pull --check` is clean after a fresh pull; golden tests green against the recorded fixtures;
-`verify` passes against the live station without any credentials beyond the tunnel.
-
-### Phase 2 — Author the intended config (no writes)
-
-Encode §8's changes as reviewable diffs in `config/`. Every change is a normal git diff plus a dry-run payload
-dump.
-
-**Exit criteria:** `validate` passes; `apply --dry-run` prints payloads that a human has read line by line;
-`diff` against live shows exactly the intended changes and nothing else.
-
-### Phase 3 — First real apply (writes, off-air)
-
-Smallest first: `djHouseRules` alone (`POST /api/settings` with one section). Then personas. Then shows. Then the
-grid. One section per apply invocation, each with its own `apply-log` entry.
-
-**Precondition for the privacy step (change 1) — before flipping anything:**
-
-```sh
-ssh homeserver 'docker exec sub-wave-controller cat /var/sub-wave/settings.json' > "$HOME/sw-backup/settings.before.json"
-ssh homeserver 'docker exec sub-wave-controller cat /var/sub-wave/schedule.json' > "$HOME/sw-backup/schedule.before.json"
-```
-
-Both files land **outside this repo** (they contain secrets). Then flip `privacy.listenerAuth`, restart the mixer,
-and **verify with one real listener connect** before telling anyone. The cost is one mixer restart, i.e. seconds of
-stream interruption; password changes after that are live, no restart. Bundle `stream.maxListeners` into the same
-restart so that interruption is paid once.
-
-**Exit criteria:** `verify` passes; `pull --check` reports no drift; `/api/schedule` grid matches the repo grid;
-`/api/now-playing` still advances; a listener with the password can still play the stream; a connect with the wrong
-password is refused.
-
-### Phase 4 — Deployment reproducibility
-
-`deploy/` becomes a working bring-up: `compose.yaml`, `env.example`, a README with the exact `docker compose up`
-sequence and the state-dir bind mount. Decide whether `macjuu-private` keeps the canonical copy (§12 Q6).
-
-**Exit criteria:** a fresh checkout can describe the running stack completely; the only missing pieces are the
-two secrets.
-
-### Phase 5 — Hardening (optional)
-
-Scheduled `diff` in CI-style cron that only reports; per-section `apply`; theme/sfx/jingle metadata capture
-(assets stay out of git).
-
-## 8. Proposed config changes
-
-Each item is a hypothesis to review, not a decision already taken.
-
-| # | Gap | Proposal | Risk |
-| --- | --- | --- | --- |
-| 1 | `listenerAuth` false — the web player is password-gated but `/stream.mp3` is open to anyone with the URL. The controller fails **open** while the setting is off (`controller/src/util/listener-auth.ts`, `listenerAuthDecision()`), which is why `privatePlayer: true` does not help | set `privacy.listenerAuth: true`, then **restart the mixer**. The controller writes `state/icecast_listener_auth.txt`; on the next broadcast/mixer restart the generated Icecast config gains per-mount `<authentication type="url">` blocks pointing at the controller's `POST /listener-auth`. No hand-edited `icecast.xml`, no compose edit, and no Caddy change (bundled Caddy already returns 404 for `/api/listener-auth`) | medium: costs **one mixer restart — seconds of stream interruption**; after that, password changes apply live. If the controller is down, new listeners fail closed while connected ones keep playing. Never expose `/api/listener-auth` publicly: it is a password oracle for the same password that guards the player |
-| 2 | `maxListeners` 100 vs "never more than a handful" | `stream.maxListeners: 8` — a real Icecast cap, not advisory: `ICECAST_MAX_CLIENTS` is injected into the broadcast container from settings (mirrored at `state/liquidsoap_icecast_max_clients.txt`), so it likely rides the same mixer-restart path as listener auth | low: takes effect on the next mixer restart, so pay for one restart by bundling it with change 1 |
-| 3 | Marvin hosts 5 of 6 shows | Sunrise Service → Arthur Dent (reluctant early riser); Friday Drive → Zaphod Beeblebrox (party, "always on"); keep Thank You-Know-Who, Working Day Vibes and Late Feels with Marvin; Weekend Daylight stays Ford → Marvin 3 / Ford 1 / Zaphod 1 / Arthur 1 | low: `personaId` swap only, guest lists already carry the other voices |
-| 4 | `playlistIds` empty on all 6 shows — no Navidrome anchoring | one curated Navidrome playlist per show; `playlistStrict` on for genre shows, off for banter shows | medium: needs Navidrome playlist ids (§12 Q4); wrong anchoring starves the picker |
-| 5 | `djHouseRules`, `djPrompt`, `djPrompts` empty | add global house rules: British English; never break character or mention being an AI; no real-world politics, medical, legal or financial advice; never spoil the Guide's answer; never read back listener data; keep talk under ~45 s; never announce the same track twice; no station-format talk during instrumental-only shows | low, and it is the cheapest visible quality win — Phase 3 step 1 |
-| 6 | `stacks/subwave` untracked in `macjuu-private` | `deploy/` in this repo: `compose.yaml` + `env.example` + README | low |
-| 7 | 12 `SKILL.md` only on the host | `config/skills/<slug>/SKILL.md` in git, plus the enabled map in `settings.skills.enabled` | low |
-| 8 | `dailyTokenCap` 0 (unlimited) | discuss; suggest a cap once the house rules are stable | low cost risk |
-
-Not proposed: changing the model (Haiku is right for a 24/7 station), changing bitrate, adding shows beyond the 6
-(the show cap is server-enforced).
-
-## 9. Verification story
-
-| # | Check | Command | Needs |
-| --- | --- | --- | --- |
-| V1 | Model is valid and self-consistent | `tools/subwave.py validate` | nothing |
-| V2 | Idempotent pull | `tools/subwave.py pull --check` | ssh |
-| V3 | No drift | `tools/subwave.py diff --exit-code` | ssh |
-| V4 | Payloads are what we think | `tools/subwave.py apply --dry-run` + golden snapshot test | nothing |
-| V5 | Grid landed | `tools/subwave.py verify` (compares repo grid and show ids against `GET /api/schedule`) | tunnel |
-| V6 | No secret escaped | `tests/test_redaction.py`; `git grep -c __REDACTED__` matches the expected count | nothing |
-| V7 | Fixtures round-trip | `pull` on `tests/fixtures/2026-10-31` reproduces the same files | nothing |
-| V8 | Station still works | `curl -s .../api/health`, `/api/now-playing` advances, stream plays | tunnel |
-
-`verify` deliberately uses the **public** `/api/schedule` endpoint (grid + show ids only) so post-apply checking
-does not need root access. The deep check is V3/V2 over the state files.
-
-Golden tests run with `python3 -m unittest discover -s tests`, no network.
-
-## 10. Rollout order
-
-1. **Read-only everything** (Phase 0–1): pull, diff, validate, verify. Zero write risk.
-2. **Dry-run** (Phase 2): payloads reviewed by a human.
-3. **One section, off-air** (Phase 3): `djHouseRules`.
-4. **Personas**, then **shows**, then the **grid**.
-5. **Deletes**: only ever manually, one at a time, with a backup export first.
-
-Before the first real write: take a `GET /api/backup/export` (or a copy of `settings.json` + `schedule.json` via
-`docker exec`) and keep it outside the repo.
-
-## 11. Secrets handling
-
-- In repo: never. `config/settings.json` carries `"__REDACTED__"` at the eleven paths in §5.5.
-- At runtime: `SUBWAVE_ADMIN_USER` / `SUBWAVE_ADMIN_PASS` from a gitignored `.env` or the Keychain
-  (`security find-generic-password -s subwave-admin -w`).
-- On the host: `/home/zaph0d/macjuu/stacks/subwave/.env` keeps `ADMIN_USER, ADMIN_PASS, SITE_URL, TZ, STATE_DIR,
-  ANTHROPIC_API_KEY`; `deploy/env.example` mirrors the key names with empty values.
-- The station/listener password is `settings.privacy.password` — it lives in the state file and in the Keychain,
-  never in git.
-- `apply` refuses payloads containing the sentinel; `pull` aborts if a live secret value appears in its output.
-
-## 12. Open questions for the human
-
-Q2 is answered and kept in place so the numbering referenced from §7 and §8 stays stable; the rest are open.
-
-1. **Persona rebalance (§8.3)** — approve Sunrise → Arthur and Friday Drive → Zaphod? It is a `personaId` swap
-   with no data loss, but it changes who you hear when.
-2. **Listener auth — RESOLVED 2026-10-31; no question left.** The flip is self-contained in `settings.json`, with
-   no hand-edited `icecast.xml`: the controller writes `state/icecast_listener_auth.txt`, and on the next
-   broadcast/mixer restart the generated Icecast config gains per-mount `<authentication type="url">` blocks
-   pointing at the controller's `POST /listener-auth`. Enabling or disabling needs that one mixer restart (seconds
-   of stream interruption, the real cost); **password changes apply live**, no restart. Icecast asks the controller
-   on every listener connect, so if the controller is down new listeners fail closed while connected ones keep
-   playing. The bundled Caddy already returns 404 for `/api/listener-auth`, so no reverse-proxy change — and that
-   path must never be exposed publicly, since it is a password oracle for the player password. `/stream.mp3` is open
-   today because `listenerAuthDecision()` fails open when the setting is off. Residual work is only the Phase 3
-   precondition: back up `settings.json` + `schedule.json`, flip, restart, and verify with one real listener connect.
-3. **`maxListeners` 8** — right number, or do you want headroom (e.g. 12)?
-4. **Navidrome playlists** — which playlists anchor which shows, and how should the tool learn playlist ids
-   (Navidrome API with the credentials in `settings.navidrome`, or by hand)? Until answered, `playlistIds` stays
-   empty and that gap stays open.
-5. **`dailyTokenCap` 0** — set a cap? What monthly spend is acceptable for a 24/7 station?
-6. **Where does the deployment live** — `deploy/` in this repo (my recommendation, it is this instance's repo) or
-   tracked inside `macjuu-private`? Duplicating it in both is the one option I would avoid.
-7. **Does the tool get ssh access to `homeserver`**, or should `apply` run on the host instead? Today the read
-   half requires `docker exec` as root.
-8. **Renaming** — confirm the convention: the filename is the slug, `id` inside the file is the link, and a rename
-   is a `git mv` that must keep the `id`.
-9. **Grid semantics** — the grid is local wall-clock hours in Europe/Amsterdam. Confirm it stays local time across
-   DST (i.e. a 07:00 show is 07:00 in both CET and CEST).
-10. **Empty cells** — may a grid cell be unassigned, or must all 168 always resolve to a show? (Needs a source
-    read to confirm the schema; the current grid has no gaps.)
-11. **Assets** — themes, sfx, jingles, beds, voices and avatars are binary and stay out of git. Confirm that
-    metadata-only capture is enough.
+1. **Container name.** Tier 2 assumes `docker exec sub-wave-controller`. That is the image default, not a
+   guarantee. Add `SUBWAVE_CONTAINER` to `.env.example`, or document the assumption?
+2. **Tier-1 apply and the grid.** `PUT /api/schedule` needs all 168 cells, and tier 1 can read the grid —
+   but should tier 1 refuse schedule writes anyway, since it cannot verify the shows it points at?
+3. **Playlist anchoring.** Shows can reference Navidrome playlist ids, and nothing in the repo knows how
+   to learn them. Navidrome API with the station's own credentials, or a manual list?
+4. **Deploy artifacts.** Does the toolkit ship a compose file for new installs, or point at upstream?
+5. **Character portability.** Should `examples/demo` double as a starting template users copy into
+   `instance/`, or stay purely illustrative?
+6. **Skill surface.** Which tasks get a skill first: new show, diagnose a host, backup, schedule review?
 
 ## 13. Non-goals
 
-Not a music library or a Navidrome replacement. No binary assets in git. No on-air control (that is the MCP
-server's job). No deploy automation, no auto-apply, no daemon, no pruning of live entities.
+Not a music library or a Navidrome replacement. No binary assets (themes, sfx, jingles, voices) in git. No
+on-air control (that is MCP's job). No auto-apply, no daemon, no pruning of live entities, no GitHub
+settings changes.

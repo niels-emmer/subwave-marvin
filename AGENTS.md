@@ -1,112 +1,124 @@
-# AGENTS.md — subwave-marvin
+# AGENTS.md — SUB/WAVE toolkit
 
-Config-as-code for **Marv's Tunes**, a private, Hitchhiker's-Guide-themed SUB/WAVE radio station at
-https://radio.macjuu.com. This repo is the source of truth for personas, shows, the weekly schedule and
-station settings; `tools/subwave.py` (planned) pulls live state in and pushes reviewed changes out.
-Design, phases and open questions: `docs/PLAN.md`.
+A toolkit for running a **SUB/WAVE** radio station from an agent session: author the station's
+character (personas, shows, schedule, house rules), read what is actually live, and push reviewed
+changes. Agent-agnostic — Claude Code, Codex, OpenCode, or anything else that reads `AGENTS.md`.
+Nothing here belongs to one station: your deployment's data lives in `instance/`, which is gitignored,
+and `examples/demo/` shows the shapes.
 
 ## Mental model
 
-It is a radio station, not a playlist. One Icecast stream; every listener hears the same track at the same
-moment; there is no skip and no per-listener queue. A **show** is a programme — persona + free-text brief +
-genre/mood/era filters — and the **7×24 grid** decides which show owns each wall-clock hour. A **persona** is
-an LLM DJ that talks between tracks; its `soul` field *is* the system prompt. Everything runs live, so a config
-change alters the next track and the next talk segment, not some offline artifact.
+It is a radio station, not a playlist. One Icecast stream; every listener hears the same track at the
+same moment; there is no skip and no per-listener queue. A **show** is a programme — persona + brief +
+genre/mood/era filters — and the **7×24 grid** decides which show owns each wall-clock hour. A
+**persona** is an LLM DJ that talks between tracks; its `soul` field *is* the system prompt. Everything
+runs live, so a config change alters the next track and the next talk segment, not an offline artifact.
 
-## Live system (verified 2026-10-31)
+## Two capability tiers — announce, never degrade silently
 
-- ssh alias `homeserver` (192.168.101.252, user `zaph0d`). Containers: `sub-wave-{web,controller,broadcast,caddy,analyzer,docker-proxy}` plus `navidrome`.
-- Compose dir `/home/zaph0d/macjuu/stacks/subwave` (`compose.yaml` + `.env`) is **untracked** in `macjuu-private`, so the deployment is not reproducible from git.
-- State dir `/home/zaph0d/dockerdata/subwave/state` → `/var/sub-wave`. Files are **root-owned**: plain `ssh`/`scp` as zaph0d gets `Permission denied`.
-- Caddy publishes host port **7700** (API + web). The controller's 7701 is container-internal; nothing listens on host 7701.
+| | Tier 1: HTTP only | Tier 2: host access |
+| --- | --- | --- |
+| Needs | base URL + admin credentials | + ssh and `docker exec` |
+| Create / update | yes | yes |
+| Read personas, shows | **trimmed** | full |
+| Read the grid | yes | yes |
+| Backup | **no schedule** | complete |
 
-### Read live config — the only correct way
+Every operation says which tier it is running at. Tier 1 is portable and lossy; do not pretend otherwise.
+
+**Tier 1 cannot read full show definitions.** `/api/schedule` returns shows cut to 7 of 26 fields and
+there is no `GET /shows`. So `apply` must only ever send whole objects built from the repo — never
+read-modify-write from a trimmed read, which would silently drop the fields it cannot see.
+
+## Where config actually lives
+
+Full fidelity lives in the state dir on the host, as two JSON documents:
+
+- `settings.json` — the whole station config. `personas[]` and `activePersonaId` are **inside it**, so
+  persona config and station config are one document.
+- `schedule.json` — `{shows[], schedule, override}`; `schedule` maps day `"0".."6"` (JS `getDay()`,
+  0 = Sunday) to 24 show ids.
+
+They are usually root-owned, so plain ssh/scp fails. Read them through the controller container:
 
 ```sh
-ssh homeserver 'docker exec sub-wave-controller cat /var/sub-wave/settings.json'
-ssh homeserver 'docker exec sub-wave-controller cat /var/sub-wave/schedule.json'
-ssh homeserver 'docker exec sub-wave-controller ls /var/sub-wave'
+ssh "$SUBWAVE_HOST" 'docker exec sub-wave-controller cat "$SUBWAVE_STATE_DIR/settings.json"'
+ssh "$SUBWAVE_HOST" 'docker exec sub-wave-controller cat "$SUBWAVE_STATE_DIR/schedule.json"'
 ```
 
-Never `scp`, `chown`, or hand-edit those files: the controller owns them and rewrites them.
+The container name is install-specific; the image default is `sub-wave-controller`. Runtime and derived
+files in the same dir (`library.db*`, `secrets.env`, `icecast*`, `liquidsoap_*.txt`, archives, logs) are
+never copied and never hand-edited.
 
-- `settings.json` (~20 KB, 52 top-level keys) is the whole station config; `personas[]` and `activePersonaId` live **inside it**, so persona and station config are one document.
-- `schedule.json` = `{shows[], schedule, override}`; `schedule` maps day `"0".."6"` (JS `getDay()`, 0 = Sunday) to 24 show ids.
-- `skills/<slug>/SKILL.md` holds custom skills: 12 on the host, 5 enabled.
-- Runtime or derived, never copy or edit: `library.db*`, `secrets.env`, `icecast-secrets.env`, `icecast_listener_auth.txt`, `liquidsoap_*.txt` (mirrors of settings knobs), `audience.json`, `queue.json`, `recent-plays.json`, `archive/`, `sessions/`, `logs/`.
+## The documented API is not the config API
 
-## The API is not the documented API
+`GET /api/connect/openapi.json` is a curated subset (auth required) with **no config writes**, and the
+read endpoints are presentation views: `/api/personas` returns 4 fields per persona even as admin,
+`/api/schedule` trims shows, and admin `GET /api/settings` is a UI summary rather than `settings.json`.
 
-`GET /api/connect/openapi.json` is a hand-curated 33-path subset (requires auth) with **no config writes**; the read endpoints are presentation views, not the config document:
-
-- `/api/personas` → only `id`, `name`, `tagline`, `avatar` — even with admin auth.
-- `/api/schedule` → the grid plus shows reduced to 7 of their 26 fields.
-- `/api/settings` (admin) → a **19-key UI summary** (`onAir`, `pickerBusy`, `defaults`, …), *not* `settings.json`.
-
-So: **reads come from the state files above; writes go to the admin API.** Real write routes, from upstream `controller/src/routes/`, absent from the OpenAPI export:
+Real write routes, absent from the OpenAPI export:
 
 | Route | Semantics |
 | --- | --- |
-| `POST /api/settings` | admin, **shallow partial merge**. Send whole top-level sections only: `{"personas":[…]}` replaces the entire array, and a partial persona silently loses fields. |
-| `POST /api/shows` | admin, body `{"show":{…}}`, **upsert by `show.id`**; no id creates a new show (409 once the show cap is hit). Returns `{shows, show}`. |
+| `POST /api/settings` | admin, **shallow partial merge**. Send whole top-level sections: `{"personas":[…]}` replaces the array, and a partial persona loses fields. |
+| `POST /api/shows` | admin, `{"show":{…}}`, **upsert by `show.id`**; no id creates a show (409 at the show cap). |
 | `PUT /api/schedule` | admin, **replaces the whole grid** — always send all 7×24 cells. |
-| `POST` / `DELETE /api/schedule/override` | admin, single programme override. |
+| `POST` / `DELETE /api/schedule/override` | admin, one-off programme override. |
 | `POST /api/personas/import`, `GET /api/personas/:id/export`, `*/personas/:id/avatar`, `DELETE /api/personas/:id`, `DELETE /api/shows/:id` | admin; the deletes are destructive. |
-| `GET /api/backup/export` | admin, ~99 MB gzip backup — not a config-sync path. |
+| `GET /api/backup/export` | admin, large zip — see below. |
 
-Auth classes: public (none), station (`x-station-auth` listener password; gates `/api/similar-tracks`), admin
-(HTTP Basic `ADMIN_USER`/`ADMIN_PASS`).
+Auth classes: public (none), station (`x-station-auth` listener password), admin (HTTP Basic). Ids are
+server-generated (`p_xxxxxx` personas, `s_xxxxxx` shows), so a slug→id lockfile is what stops a rename
+from creating a duplicate.
 
-**MCP is control-only, and that is settled.** `/api/mcp` exposes **21 tools** live (verified via `tools/list`;
-`similar_tracks` and `queue_block` are newer than the published docs): health, now_playing, station_state,
-schedule, session, request_song, request_status, search_library, similar_tracks, queue_track, queue_block,
-skip_track, dj_announce, dj_segment, list_skills, run_skill, list_sfx, play_sfx, list_jingles, play_jingle,
-refresh_playlist. **Zero config tools — no persona, show, schedule or settings writer exists over MCP**; those go
-through the admin HTTP API. Do not re-litigate this from `/manual/mcp`, which contradicts itself (heading 17,
-table 19, repo doc 20, live 21): `tools/list` is the truth. Ids are server-generated: `p_xxxxxx` personas,
-`s_xxxxxx` shows.
+## MCP is control-only — settled
+
+`/api/mcp` exposes 21 tools: reads, listener requests, and on-air control. **Zero config writers** — no
+persona, show, schedule or settings tool exists. Config goes through the admin HTTP API. Do not
+re-litigate this from the published manual, which contradicts itself; `tools/list` is the truth.
+
+## A backup does not contain the schedule
+
+`GET /api/backup/export` is a ~95 MB zip holding `settings.json`, `library.db`, skills, sfx, jingles,
+avatars and themes — and **no `schedule.json`**. Personas survive because they live in settings.json;
+every show and the whole grid do not. A backup that silently omits the programming is worse than none:
+include the schedule (tier 2, copy `schedule.json` as well) or refuse and say why (tier 1).
 
 ## Safety
 
-- The station is **live**. Never apply config during a show you would not want to hear break: check
-  `/api/now-playing` first, prefer an off-air window, and warn listeners with a DJ segment when in doubt.
-- **Not every setting applies live.** `privacy.listenerAuth` and `stream.maxListeners`/`opus`/`aac` take effect only on a **mixer restart**, where the controller regenerates the Icecast config and injects `ICECAST_MAX_CLIENTS`; one restart costs seconds of stream interruption, so bundle such changes. Passwords and everything else apply live.
-- Never commit secrets. `ADMIN_PASS`, the station password (`settings.privacy.password`), `ANTHROPIC_API_KEY`,
-  and the keys inside `settings.json` (`llm.apiKey`, `llm.fallback.apiKey`, `tts.cloud.*`, `search.apiKey`,
-  `embedding.apiKey`, `scrobble.*`) come from a gitignored `.env` or the macOS Keychain at apply time. `pull`
-  redacts them; `apply` must never transmit the redaction sentinel.
-- Deletes (`DELETE /api/shows/:id`, `DELETE /api/personas/:id`) run only when the human asks, never as a side effect of a sync.
-- Do not start a second SUB/WAVE stack against the same state dir.
+- The station is **live**. Check what is on air before applying and prefer an off-air window.
+- **Not every setting applies live.** `privacy.listenerAuth` and `stream.maxListeners`/`opus`/`aac` take
+  effect only on a **mixer restart**, where the controller regenerates the Icecast config; one restart
+  costs seconds of stream interruption, so bundle such changes. Passwords and the rest apply live.
+- Never commit instance data. `instance/` and `.env` are gitignored, and `scripts/check-secrets.sh`
+  blocks live values from entering a commit.
+- Deletes run only when the human asks, never as a side effect of a sync.
+- Never run a second stack against the same state dir.
 
 ## Commands
 
-Run `git config core.hooksPath .githooks` once after cloning: it enables the pre-commit secret gate, which agents never turn on otherwise.
-
-Live read and verify — every one of these was run against the live station:
+Run `git config core.hooksPath .githooks` once after cloning: it enables the pre-commit secret gate,
+which agents otherwise never turn on.
 
 ```sh
-ssh homeserver 'curl -s http://localhost:7700/api/health'          # {"status":"on-air"}
-ssh homeserver 'curl -s http://localhost:7700/api/now-playing'
-ssh homeserver 'curl -s http://localhost:7700/api/schedule' | python3 -m json.tool | head
-# admin calls: keep the credentials on the host, never on your own command line
-ssh homeserver 'cd /home/zaph0d/macjuu/stacks/subwave && set -a; . ./.env; set +a; \
-  curl -s -u "$ADMIN_USER:$ADMIN_PASS" http://localhost:7700/api/settings'
+sh scripts/check-secrets.sh          # commit gate: tracked files
+sh scripts/check-secrets.sh --all    # also untracked-but-not-ignored
 ```
 
-Planned — **not implemented yet**, see `docs/PLAN.md`:
+Planned, not implemented yet — design in `docs/PLAN.md`:
 
 ```sh
-tools/subwave.py pull                # live state -> repo, secrets redacted
-tools/subwave.py diff                # read-only drift report
-tools/subwave.py apply --dry-run     # print payloads, send nothing
-tools/subwave.py verify              # repo grid == /api/schedule
-python3 -m unittest discover -s tests
+scripts/subwave.py status            # which tier, which station, what is on air
+scripts/subwave.py pull              # live -> instance/ (secrets redacted)
+scripts/subwave.py diff              # read-only drift report
+scripts/subwave.py apply --dry-run   # print payloads, send nothing
+scripts/subwave.py backup            # refuses at tier 1; includes the schedule at tier 2
 ```
 
 ## Layout
 
-`config/` is the source of truth: `settings.json` (secrets redacted), `personas/<slug>.json`,
-`shows/<slug>.json`, `schedule.json` (grid by slug), `skills/<slug>/SKILL.md`, and `ids.lock.json` — a
-generated slug→server-id map, never hand-edited, that is what keeps a rename from creating a duplicate.
-`tools/` is Python 3.14 stdlib only. `tests/fixtures/` holds redacted recorded snapshots. Read `docs/PLAN.md`
-before editing anything under `config/`.
+`instance/` is this deployment and is gitignored: `settings.json` plus a `character/` layer
+(`character.json` for identity and house rules, `personas/*.json`, `shows/*.json`, `schedule.json`).
+`examples/demo/` is a committed fictional station in the same shape, so the repo is testable with no
+live station. `docs/PLAN.md` holds the design and phases, `docs/decision-log.md` the decisions, and
+`docs/applied.md` the on-air audit trail.

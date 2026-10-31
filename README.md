@@ -1,15 +1,20 @@
 # subwave-marvin
 
-Configuration-as-code for **Marv's Tunes**, a private SUB/WAVE radio station themed around
-The Hitchhiker's Guide to the Galaxy.
+A toolkit for running a **SUB/WAVE** radio station from an agent session: clone it, point an agent at
+your station, and ask in plain language — "make a new show", "why does host X talk so much", "make a backup".
 
-Personas, shows, the weekly schedule and station settings are defined here, and a small sync tool
-(planned, see the plan) pushes them to the live instance so a change is reviewable before it goes on air.
+Agent-agnostic: the entry point is `AGENTS.md`, so Claude Code, Codex, OpenCode or any other agent picks
+up the same instructions; skills and scripts do the mechanical parts.
 
-- Agents: read `AGENTS.md` first.
-- Plan and phases: `docs/PLAN.md`.
-- Decisions: `docs/decision-log.md`. Applied changes: `docs/applied.md`.
+**Two tiers, announced rather than assumed.** HTTP only: you can create and update config, but reads come
+back trimmed and a backup cannot include the schedule. With ssh to the host: full fidelity, including
+show definitions and the grid.
 
-Before committing, run `sh scripts/check-secrets.sh` — the pre-commit hook runs it for you once
-`git config core.hooksPath .githooks` has been set. `sh scripts/check-secrets.sh --all` sweeps the
-working tree; the default form is the commit gate.
+```sh
+cp .env.example .env     # base URL, admin credentials, station password
+# tier 2 only: also set SUBWAVE_HOST and SUBWAVE_STATE_DIR
+```
+
+Point your agent here and ask for `scripts/subwave.py status` (the tool lands in P1 — see `docs/PLAN.md`).
+`instance/` is gitignored and `examples/demo/` is a fictional station, so the repo is testable without one.
+`AGENTS.md` first · `docs/PLAN.md` design · `docs/decision-log.md` why · `docs/applied.md` what went on air

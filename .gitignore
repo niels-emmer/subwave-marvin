@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# This deployment's real data (station identity, personas, shows, secrets).
+# Never committed: the repo is public-facing, instance data stays local.
+instance/
+
 # Local scratch
 *.bak
 backups/

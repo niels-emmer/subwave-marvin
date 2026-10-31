@@ -9,32 +9,32 @@ changed, undo it, and keep a history of how the station got to sound the way it 
 ### Finding out what is going on
 
 **"What's on air right now?"**
-Tells you the track, the show and the host, and whether the station is actually streaming.
+The track, the show, the host, and whether the station is actually streaming.
 
 **"What changed since last week?"**
-Compares your files against the live station and lists what differs — by host, by show, by grid cell.
-Nothing is changed by asking.
+Compares your files against the live station and lists what differs, by host, by show, by hour of the
+week. Asking changes nothing.
 
 ### Fixing how a host sounds
 
 **"Why does <host> talk so much?"**
 Reads that host's dials, their written character and the shows they present, then proposes the smallest
-change that would fix it. It does not guess: if the answer is "the show is set to talk a lot", it says so
-and shows you the field.
+change that would fix it. It does not guess: if the answer is "that show is set to talk a lot", it says so
+and shows you the setting.
 
 **"Make <host> warmer"** or **"make this show less chatty"**
-Changes that one setting, checks the result, and shows you the before and after. Nothing goes live until
-you say so.
+Changes that one setting, checks the result, and shows you before and after. Nothing goes live until you
+say so.
 
 ### Adding people and programmes
 
 **"Add a host"**
-Scaffolds a new host — but it will ask you to describe the character first, because a host's soul *is* the
+Scaffolds a new host — but it asks you to describe the character first, because a host's soul *is* the
 prompt the DJ writes from. A blank soul produces a blank presenter.
 
 **"Make me a new show"**, then **"put it on Sunday mornings"**
-Creates the show and fills the hours you name in the weekly grid. It will show you which cells it is about
-to change, including any it would take from another show.
+Creates the show and fills the hours you name in the weekly grid, showing you which cells it changes and
+which it would take from another show.
 
 ### Keeping things out
 
@@ -42,74 +42,129 @@ to change, including any it would take from another show.
 Adds a ban. Bans apply to the whole station, or only while a particular show is on air.
 
 **"Block Christmas music until December"**
-This one is worth reading twice. A seasonal rule's window is **when the rule is paused**, not when it
-applies — so a December window means the ban is off during December and on for the other eleven months.
-If you want the opposite, say so and the window goes the other way round.
+Worth reading twice: a seasonal rule's window is **when the rule is paused**, not when it applies. A
+December window means the ban is off during December and on for the other eleven months. If you want it the
+other way round, say so.
 
 ### Protecting the station
 
 **"Back up the station"**
-Takes a copy of the settings, the shows, the schedule, the station's skills and its media manifests — and
-writes a note saying where each file goes back. This is deliberately more than the console's export, which
-leaves out the schedule and therefore every show and the whole grid.
+Copies the settings, the shows, the schedule, the station's skills and its media manifests, and writes a
+note saying where each file goes back. Deliberately more than the console's export, which leaves out the
+schedule — and so loses every show and the whole grid.
 
 **"Put the station back to what's in git"**
-Applies your files to the station. It shows you every change first and sends nothing until you confirm.
+Sends your files to the station. It shows you every change first and sends nothing until you confirm.
 
 **"Undo the last change"**
-Puts a backup back, or applies an earlier commit — your choice, depending on whether you want the station
-as it was ten minutes ago or as it was last week.
+Puts a backup back, or applies an earlier commit — depending on whether you want the station as it was ten
+minutes ago or last week.
 
 ### Live, right now
 
 **"Say something on air"**, **"skip this track"**, **"play a jingle"**
-These change what is happening this second. They are the only things in the toolkit that do, they need your
-explicit go-ahead each time, and a skip additionally needs to know which track you meant — or your
-permission to skip whatever is playing.
+These change what is happening this second. They are the only things here that do, they need your explicit
+go-ahead each time, and a skip also needs to know which track you meant — or your permission to skip
+whatever is playing.
 
 ## What it cannot do yet
 
-- **Avatars and station imaging.** Jingles, sound effects and beds are backed up but not authored here.
-  Use the station's admin console for those.
-- **Library work.** Tagging, building playlists, searching your collection — that is Navidrome's job, and
-  the station's own tools do it better than a config repo could.
-- **Anything that bypasses the station's review step for a skill's custom script.** A skill can carry a
-  small script, and the station deliberately refuses to run one until a person has read it and trusted it.
-  Nothing here shortcuts that, and nothing should.
+- **Avatars and station imaging.** Jingles, sound effects and beds are backed up but not authored here. Use
+  the station's admin console for those.
+- **Library work.** Tagging, building playlists, searching your collection — that is Navidrome's job.
+- **Anything that bypasses the station's review step for a skill's custom script** — the station refuses to
+  run one until a person has read and trusted it, and nothing here shortcuts that.
 
-## Getting started
+## How it works
 
-You need three things: the station's address, its admin username and its admin password. Put them in a
-`.env` file (copy `.env.example`), then ask your agent for the station's status.
+Your station is described by the files in `instance/`. That directory is yours alone — it is excluded from
+git, so nothing about your station is ever published. Your agent edits those files, shows you the diff, and
+sends them only when you say so.
 
-If your agent can also reach the machine the station runs on, tell it the ssh host and the station's data
-directory. That unlocks the fuller picture: complete show definitions, and a backup that can actually
-restore the station. Without it you get a trimmed view and a backup that cannot bring the programming back.
+```
+   instance/  ──edit──►  diff  ──you approve──►  apply  ──►  the station
+   your files             what would change       sends nothing until you say yes
+```
 
----
+A few things work the other way round, because waiting for a file edit makes no sense when the DJ is
+mid-sentence:
 
-## Appendix: the commands, for the curious
+```
+   "say something on air"  ──►  the station      (no file, no review, gone in a minute)
+```
 
-Everything above is the agent driving these. You can run them yourself.
+That second path is the only one that skips the review, and it never touches your files or your history.
 
-| Command | What it does |
-| --- | --- |
-| `status` | tier, station, what is on air, whether your files match the station |
-| `pull` | copy the station's settings into `instance/` (`--force` replaces, `--allow-lossy` accepts a partial copy) |
-| `diff` | list what differs between your files and the station |
-| `validate` | check your files before applying them (`--dir` for another station directory) |
-| `apply` | send your files to the station; dry run unless `--yes` |
-| `backup` | config, assets and schedule, outside the repo (`--with-library` adds the audio analysis) |
-| `restore` | put a backup back; dry run unless `--yes` |
-| `character` | create and edit hosts, shows and the weekly grid |
-| `skills` | the station's own DJ segments: list, new, show, edit, rm |
-| `blocklist` | bans and rules: list, block, unblock, rm, rule add/edit |
-| `onair` | live control: tools, now, state, say, segment, skip, request, queue, sfx, jingle, list |
+## Setting it up
 
-`apply` also takes `--force-now` to write while a show is on air, `--no-backup` to skip the backup, and
-`--prune` / `--force-prune` to delete things that exist on the station but not in your files.
+You need `python3` (nothing to install), your station, and its admin username and password. Copy
+`.env.example` to `.env` and fill it in, then ask your agent for the station's status.
+
+One honest note. With only the station's web address you get a partial picture: the API trims host and show
+details, and a backup cannot include your shows or the weekly grid. If your agent can also reach the machine
+the station runs on, tell it the ssh host and the data directory — then you get the whole thing, including a
+backup that can restore the programming. Worth doing before you change anything.
+
+## A sample session
+
+> **You:** Add a host. A late-night one, dry, doesn't oversell anything.
+>
+> **Agent:** Before I scaffold them, two things: what are they called, and what do they actually sound
+> like? The soul field is the prompt the DJ writes from, so a thin description gives you a thin presenter.
+>
+> **You:** Nell, I suppose. Talks about the weather and the tide. Understated. Never says "amazing".
+>
+> **Agent:** Wrote `instance/character/personas/nell.json` with that soul, and dialled warmth up and humour
+> down to match. Validate passes, and nothing is on the station yet. To put her on air I'd give her a show —
+> want me to create "Late Harbour", midnight to six, taking those hours from what's there now? That moves
+> three grid cells.
+>
+> **You:** Yes.
+>
+> **Agent:** Dry run: one persona, one show, three grid cells. Sending now — done, and read back from the
+> station to confirm all three landed.
+
+## Safety, short
+
+Nothing is written to your station until you say so, and a backup is taken first. Every write is read back
+afterwards, so a change that did not land is reported rather than assumed. Deletions refuse when something
+still depends on what you are deleting. The full list of guards, and what each protects against, is in
+`AGENTS.md`.
+
+## Appendix: the technical reference
+
+Two ways to reach a station. The second is worth having.
+
+|  | Web address only | Plus ssh access |
+| --- | --- | --- |
+| Needs | address + admin password | also ssh and `docker exec` |
+| Read hosts and shows | trimmed | complete |
+| Read the weekly grid | yes | yes |
+| Backup | **without the schedule** | complete |
+
+| Command | What it does | Example |
+| --- | --- | --- |
+| `status` | tier, station, what is on air, whether your files match | `status` |
+| `pull` | copy the station into `instance/` | `pull --force` |
+| `diff` | what differs between your files and the station | `diff` |
+| `validate` | check your files before applying | `validate --dir examples/demo` |
+| `apply` | send your files to the station; dry run unless `--yes` | `apply --yes` |
+| `backup` | config, assets and schedule, outside the repo | `backup --with-library` |
+| `restore` | put a backup back | `restore <dir> --yes` |
+| `character` | hosts, shows and the weekly grid | `character new-show <slug> --persona <persona>` |
+| `skills` | the station's own DJ segments | `skills new late-shift` |
+| `blocklist` | bans and rules | `blocklist block --type artist --id <id>` |
+| `onair` | live control | `onair say "Back after this." --yes` |
+
+Flags live here rather than in the body: `apply` also takes `--force-now` (write while on air), `--no-backup`,
+`--backup-dir`, and `--prune` / `--force-prune` for things on the station but not in your files. `pull` takes
+`--allow-lossy` for a partial copy. Every `onair` verb that changes air needs `--yes`; `skip` needs
+`--expect-id` or `--any-track`.
+
+`examples/demo/` is a fictional station in the same shape as `instance/`, so you can try any of this without
+a station of your own. `instance/skills/` holds the station's own DJ segments; `skills/` at the top of the
+repo holds the procedures your agent follows. They are different things.
 
 ## Where to read more
 
-`AGENTS.md` for agents · `docs/PLAN.md` for design · `docs/decision-log.md` for why things are the way they
-are · `docs/applied.md` for what has gone on air.
+`AGENTS.md` for agents and the full guard list · `docs/PLAN.md` for design · `docs/decision-log.md` for why · `docs/applied.md` for what has aired.

@@ -13,3 +13,6 @@ It exists so the repo is testable with no live station: the shapes here are the 
 | `character/personas/*.json` | the host roster |
 | `character/shows/*.json` | show briefs |
 | `character/schedule.json` | the 7×24 grid, 168 cells, every cell filled |
+
+CI validates this directory — `python3 scripts/subwave.py validate --dir examples/demo` — so a
+schema regression here fails the build instead of surfacing later as a broken `character init --from demo`.

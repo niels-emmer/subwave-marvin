@@ -19,6 +19,18 @@ jobs:
       - name: Run the suite
         run: python3 -m unittest discover -s tests
 
+  # examples/demo is the repo's schema reference and the fixture `character init
+  # --from demo` copies. A regression in it (a dropped persona or show field, a
+  # grid cell naming a missing show, a lockfile id that violates ID_RE) must fail
+  # here rather than surface later as a broken scaffold. Local files only: no
+  # network, no ssh, no credentials, no instance/.
+  demo:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate the committed demo station
+        run: python3 scripts/subwave.py validate --dir examples/demo
+
 # Tests must never require a live station. The suite runs offline: no network,
 # no ssh, and the mock station (tests/mock_station.py) is started in-process on
 # loopback. If a test needs a real station, it belongs behind a flag, not here.

@@ -1,13 +1,28 @@
 #!/bin/sh
 # check-secrets.sh - fail if a live station credential sits in a git-tracked file.
 #
-# Scope: tracked files only. This is a commit gate, not a worktree sweep, so a
-# secret in an untracked or ignored file is deliberately invisible here.
+# Default: tracked files only. This is the commit gate (pre-commit and CI), so it
+# stays fast and commit-scoped. A secret in an untracked or ignored file is
+# deliberately invisible here.
+#
+# --all: also scan untracked-but-not-ignored files, because a bug in the pull tool
+# could leave a raw-secrets file in the worktree that a commit-only gate never sees
+# until someone stages it. Ignored files stay out of scope even with --all: a .env
+# is allowed to hold secrets.
 #
 # Add "# nosecret" to a line to allow a documented false positive.
 # "password": "__REDACTED__" is legal repo content (PLAN 5.5) and is not a hit.
 
 set -u
+
+case "${1-}" in
+    --all) all=1 ;;
+    '') all=0 ;;
+    *)
+        echo "usage: $(basename "$0") [--all]" >&2
+        exit 2
+        ;;
+esac
 
 hits_file=$(mktemp) || exit 2
 list_file=$(mktemp) || exit 2
@@ -18,8 +33,12 @@ git ls-files > "$list_file" 2>/dev/null || {
     exit 2
 }
 
+if [ "$all" -eq 1 ]; then
+    git ls-files --others --exclude-standard >> "$list_file" 2>/dev/null
+fi
+
 if [ ! -s "$list_file" ]; then
-    echo "check-secrets: clean (no tracked files)"
+    echo "check-secrets: clean (no files to scan)"
     exit 0
 fi
 
@@ -89,5 +108,5 @@ if [ -s "$hits_file" ]; then
     exit 1
 fi
 
-printf 'check-secrets: clean (%s tracked files)\n' "$(wc -l < "$list_file" | tr -d ' ')"
+printf 'check-secrets: clean (%s files scanned)\n' "$(wc -l < "$list_file" | tr -d ' ')"
 exit 0

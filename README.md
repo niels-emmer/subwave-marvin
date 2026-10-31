@@ -11,4 +11,5 @@ Personas, shows, the weekly schedule and station settings are defined here, and 
 - Decisions: `docs/decision-log.md`. Applied changes: `docs/applied.md`.
 
 Before committing, run `sh scripts/check-secrets.sh` — the pre-commit hook runs it for you once
-`git config core.hooksPath .githooks` has been set.
+`git config core.hooksPath .githooks` has been set. `sh scripts/check-secrets.sh --all` sweeps the
+working tree; the default form is the commit gate.

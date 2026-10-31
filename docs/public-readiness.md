@@ -19,8 +19,10 @@ once it *is* out there.
 | Community profile | 100% — README, LICENSE, SECURITY, CONTRIBUTING, CODE_OF_CONDUCT, PR template |
 | Release | `v1.0.0`, tagged from `main` after CI was green |
 | Branch protection on `main` | requires `secrets`, `tests`, `demo`; strict; 1 approval; no force-push; no deletion |
-| Secret scanning | enabled |
+| Secret scanning | enabled (provider patterns; no custom patterns — the repo has no credential format of its own) |
 | Push protection | enabled |
+| Dependabot security updates | **off on purpose** — no runtime dependency graph to patch; see [SECURITY.md](../SECURITY.md#dependencies) |
+| Homepage / social preview | none — the repo is shared for knowledge, not promoted, and it has no frontend |
 
 Re-verify the settings that matter:
 
@@ -178,6 +180,10 @@ see inside binaries. Turn it on once per clone:
 ```sh
 git config core.hooksPath .githooks
 ```
+
+This is **per clone**, and a clone made before the repository went public does not have it — the
+hook is simply dormant until set. Check with `git config --get core.hooksPath`; empty output means
+it is off. Any clone that predates 2026-10-31, including the maintainer's, needs it set once.
 
 GitHub's push protection is the control: server-side, for every clone, and not skippable by whoever is
 pushing.

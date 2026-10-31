@@ -65,6 +65,21 @@ These are deliberate, documented trade-offs rather than oversights:
    `opus`, `aac`). A restart costs seconds of stream interruption; the toolkit tells you which
    changes need one rather than restarting behind your back.
 
+## Dependencies
+
+There are none at runtime: the toolkit is Python 3 standard library only, and CI runs on a bare
+`ubuntu-24.04` runner with no install step. That decides what is worth turning on:
+
+- **Dependabot watches GitHub Actions versions only.** `.github/dependabot.yml` has a single
+  `github-actions` entry because there is no pip ecosystem to watch.
+- **Dependabot security updates are disabled on purpose.** With no runtime dependency graph there is
+  nothing for them to patch. Leaving them enabled would show a green "security updates on" signal
+  that can never fire, which is worse than an honest off. If a runtime dependency is ever added,
+  turn them on in the same change.
+- **Secret scanning uses the provider patterns** (GitHub, AWS and the rest) **plus push protection.**
+  No custom patterns are configured: this repo has no credential format of its own to match, and
+  `scripts/check-secrets.sh` covers the project-specific cases locally and in CI.
+
 ## Out of scope
 
 The station itself — its authentication, its Icecast and Liquidsoap configuration, and the

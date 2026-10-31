@@ -1176,6 +1176,26 @@ def settings_payload(model):
     return payload
 
 
+# Prefixes of every secret path, for deciding what a message may say. A
+# verification step must never be able to print a credential, so this is
+# structural: the path decides, not the value.
+SECRET_PATH_PREFIXES = tuple(
+    ".".join(part for part in path if part != "*") for path in REDACT_PATHS)
+
+
+def _is_secret_path(path):
+    return any(path == prefix or path.startswith(prefix + ".")
+               for prefix in SECRET_PATH_PREFIXES)
+
+
+def _describe(path, expected, actual):
+    """One problem line. Secret paths are named, never printed."""
+    clean = path.rstrip(".") or "value"
+    if _is_secret_path(clean):
+        return "%s (secret; the station does not hold what was sent)" % clean
+    return "%s (sent %r, station has %r)" % (clean, expected, actual)
+
+
 def _diff_values(expected, actual, path=""):
     """Paths where the station does not hold what we sent."""
     problems = []
@@ -1193,8 +1213,7 @@ def _diff_values(expected, actual, path=""):
             for index, (left, right) in enumerate(zip(expected, actual)):
                 problems += _diff_values(left, right, "%s[%d]." % (path, index))
     elif expected != actual:
-        problems.append("%s (sent %r, station has %r)"
-                        % (path.rstrip(".") or "value", expected, actual))
+        problems.append(_describe(path, expected, actual))
     return problems
 
 
@@ -1214,8 +1233,10 @@ def verify_written(config, tier, steps, grid_body):
                     problems += _diff_values(sent, settings_now.get(key), "%s." % key)
             elif step["entity"] == "show":
                 sent = step["body"]["show"]
+                # A scaffolded show was sent without an id, so match by name.
                 found = next((show for show in (schedule_now.get("shows") or [])
-                              if sent.get("id") and show.get("id") == sent.get("id")), None)
+                              if (sent.get("id") and show.get("id") == sent.get("id"))
+                              or (not sent.get("id") and show.get("name") == sent.get("name"))), None)
                 if found is None:
                     problems.append("shows: %r is not on the station" % sent.get("name"))
                 else:
@@ -1234,7 +1255,8 @@ def verify_written(config, tier, steps, grid_body):
                     continue
                 sent = step["body"]["show"]
                 found = next((show for show in (schedule_now.get("shows") or [])
-                              if show.get("id") == sent.get("id")), None)
+                              if (sent.get("id") and show.get("id") == sent.get("id"))
+                              or (not sent.get("id") and show.get("name") == sent.get("name"))), None)
                 if found is None:
                     problems.append("shows: %r is not on the station" % sent.get("name"))
                     continue
@@ -1449,22 +1471,26 @@ def cmd_apply(config, args):
                                    "body": grid_body, "label": "grid"})
     print("wrote     PUT %-14s %-28s -> HTTP %s" % ("/api/schedule", "grid", status))
 
-    # Prove it landed. A 200 means "accepted", not "stored what we sent", and a
-    # silent no-op is the worst failure this tool has.
-    problems = verify_written(config, tier, build_steps(model, lock), grid_body)
-    if problems:
-        shown = problems[:10]
-        more = "" if len(problems) <= 10 else " (+%d more)" % (len(problems) - 10)
-        raise ToolError(
-            "the station did not store what was sent, so the change did NOT land:\n  %s%s"
-            % ("\n  ".join(shown), more))
-
+    # The writes succeeded, so record that before anything else can fail: a
+    # verification that throws must not erase the fact that the station changed.
     lock["applied"] = {
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "hash": payload_hash(build_steps(model, lock), grid_body),
         "tier": tier,
     }
     write_json(lock_path, lock)
+
+    # Prove it landed. A 200 means "accepted", not "stored what we sent", and a
+    # silent no-op is the worst failure this tool has. Compare against the steps
+    # that were SENT (rehydrated), never a rebuild from the model: rebuilding
+    # compares against __REDACTED__ and cries wolf on every secret.
+    problems = verify_written(config, tier, steps, grid_body)
+    if problems:
+        shown = problems[:10]
+        more = "" if len(problems) <= 10 else " (+%d more)" % (len(problems) - 10)
+        raise ToolError(
+            "the station did not store what was sent, so the change did NOT land:\n  %s%s"
+            % ("\n  ".join(shown), more))
     print("result    %d step(s) written; ids.lock.json updated" % (len(steps) + 1))
     return EXIT_OK
 

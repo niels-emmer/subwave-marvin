@@ -42,7 +42,8 @@ class CharacterAppliedTests(unittest.TestCase):
         })
 
         self._saved = (subwave.INSTANCE_DIR, subwave.SshStateSource,
-                       subwave.read_state_file, subwave.detect_tier)
+                       subwave.read_state_file, subwave.detect_tier,
+                       subwave.builtin_skill_slugs)
         subwave.INSTANCE_DIR = self.tmp / "instance"
         subwave.SshStateSource = lambda config: subwave.LocalStateSource(
             self.server.state_dir)
@@ -51,6 +52,7 @@ class CharacterAppliedTests(unittest.TestCase):
             self.server.station.settings if name == "settings.json"
             else self.server.station.schedule)
         subwave.detect_tier = lambda config, probe=None: (2, "mock")
+        subwave.builtin_skill_slugs = lambda config, state: {"curiosity"}
         self.addCleanup(self._restore)
 
         document = json.loads(FIXTURE.read_text(encoding="utf-8"))
@@ -64,7 +66,8 @@ class CharacterAppliedTests(unittest.TestCase):
 
     def _restore(self):
         (subwave.INSTANCE_DIR, subwave.SshStateSource,
-         subwave.read_state_file, subwave.detect_tier) = self._saved
+         subwave.read_state_file, subwave.detect_tier,
+         subwave.builtin_skill_slugs) = self._saved
 
     # -- helpers -----------------------------------------------------------
     def run_cli(self, *args):
@@ -167,6 +170,39 @@ class PostApplyCheckTests(CharacterAppliedTests):
         code, output = self.apply()
         self.assertEqual(code, 0, output)
         self.assertNotIn("did NOT land", output)
+
+    def test_a_failed_verification_is_retried_not_reported_as_no_change(self):
+        """The failure that matters: a retry must re-send, not claim success.
+
+        lock["applied"] is recorded before verification runs. If the hash alone
+        gated the no-op, the apply that just failed verification would record the
+        hash of the payload that did not land, and the next run would short-
+        circuit with "no changes" and exit 0, leaving the station wrong.
+        """
+        self.edit_character(name="Harbour After Dark")
+        original = subwave.read_state_file
+
+        def stale(config, name):
+            if name == "settings.json":
+                settings = dict(self.server.station.settings)
+                settings["station"] = "Harbour Lights"  # the write never landed
+                return json.dumps(settings)
+            return original(config, name)
+
+        subwave.read_state_file = stale
+        self.addCleanup(lambda: setattr(subwave, "read_state_file", original))
+
+        code, output = self.apply()
+        self.assertNotEqual(code, 0)
+        self.assertIn("did NOT land", output)
+
+        before = len(self.server.station.requests)
+        code, output = self.apply()
+        self.assertIn("did NOT land", output,
+                      "the station still does not hold what was sent")
+        self.assertNotIn("no changes", output)
+        self.assertGreater(len(self.server.station.requests), before,
+                           "a retry after a failed verification must re-send")
 
 
 class SecretVerificationTests(CharacterAppliedTests):

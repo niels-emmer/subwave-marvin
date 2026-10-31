@@ -321,3 +321,57 @@ class MoodValidationTests(SkillsTestCase):
         self.assertEqual(code, 0, output)
         self.assertIn("0 warning(s)", output, "genres are tags, not an enum")
         self.assertNotIn("Made Up Genre", output)
+
+
+class CaptureSafetyTests(SkillsTestCase):
+    """A capture must not cost the operator what is already in the repo."""
+
+    def test_an_unreadable_builtin_list_fails_the_pull(self):
+        self.assertEqual(self.pull()[0], 0)
+        original = self.skill_path("demo-skill").read_text()
+
+        subwave.builtin_skill_slugs = lambda config, state: None
+        code, output = self.pull()
+
+        self.assertEqual(code, 1)
+        self.assertIn("built-in skills", output)
+        self.assertEqual(self.skill_path("demo-skill").read_text(), original,
+                         "a failed pull must not remove an existing capture")
+
+    def test_pull_skills_raises_rather_than_capturing_nothing(self):
+        subwave.builtin_skill_slugs = lambda config, state: None
+        with self.assertRaises(subwave.ToolError) as caught:
+            subwave.pull_skills(subwave.Config(dotenv={}, environ={}), 2)
+        self.assertIn("built-in", str(caught.exception))
+
+    def test_a_traversal_slug_is_never_written(self):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            subwave.write_repo_skills(
+                {"../../evil": "---\nname: evil\n---\n\nbody\n",
+                 "good-slug": "---\nname: good-slug\n---\n\nbody\n"},
+                root=subwave.INSTANCE_DIR)
+
+        self.assertTrue((subwave.INSTANCE_DIR / "skills" / "good-slug" / "SKILL.md").is_file(),
+                        "a valid slug is still captured")
+        self.assertFalse((self.tmp / "evil").exists(),
+                         "a station-supplied slug must not escape instance/skills")
+        self.assertTrue((subwave.INSTANCE_DIR / "skills").is_dir())
+        self.assertIn("../../evil", buffer.getvalue(),
+                      "a skipped slug is reported, not dropped silently")
+
+
+class EditSafetyTests(SkillsTestCase):
+    def test_editing_a_skill_whose_frontmatter_is_broken_is_refused(self):
+        self.assertEqual(self.pull()[0], 0)
+        path = self.skill_path("broken")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        broken = "# a heading, no frontmatter\n\nA prompt worth keeping.\n"
+        path.write_text(broken)
+
+        code, output = self.run_cli("skills", "edit", "broken", "--label", "New label")
+
+        self.assertEqual(code, 1)
+        self.assertIn("frontmatter does not parse", output)
+        self.assertEqual(path.read_text(), broken,
+                         "an unparseable skill must not be rewritten as an empty prompt")

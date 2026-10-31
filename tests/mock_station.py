@@ -6,6 +6,7 @@ proven without touching a live station:
 
   GET  /api/health          public
   GET  /api/now-playing     public
+  GET  /api/personas        public; TRIMMED to 4 fields per persona
   GET  /api/schedule        public; shows TRIMMED to 7 of 26 fields
   GET  /api/settings        admin; the 19-key UI summary, NOT settings.json
   POST /api/settings        admin; SHALLOW merge - a top-level key replaces wholesale
@@ -108,6 +109,14 @@ class Station:
             "timezone": self.settings.get("timezone"),
             "locale": self.settings.get("locale"),
         }
+
+    def public_personas(self):
+        """The 4 fields /api/personas exposes, even to an admin."""
+        return {"personas": [
+            {"id": p.get("id"), "name": p.get("name"),
+             "tagline": p.get("tagline"), "avatar": p.get("avatar")}
+            for p in self.settings.get("personas") or []
+        ]}
 
     def now_playing(self):
         persona = None
@@ -255,6 +264,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/now-playing":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.now_playing())
+        if path == "/api/personas":
+            self.station.record("GET", path, None, True)
+            return self._send(200, self.station.public_personas())
         if path == "/api/schedule":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_schedule())
@@ -291,6 +303,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         path = urlsplit(self.path).path
         body = self._body()
+        if path == "/api/personas":
+            self.station.record("GET", path, None, True)
+            return self._send(200, self.station.public_personas())
         if path == "/api/schedule":
             if not self._admin("PUT", path, body):
                 return

@@ -95,6 +95,11 @@ include the schedule (tier 2, copy `schedule.json` as well) or refuse and say wh
   costs seconds of stream interruption, so bundle such changes. Passwords and the rest apply live.
 - Never commit instance data. `instance/` and `.env` are gitignored, and `scripts/check-secrets.sh`
   blocks live values from entering a commit.
+- **`apply` refuses a lossy capture.** `pull` records `capture.lossy` in `ids.lock.json`; a
+  tier-1 `--allow-lossy` pull sets it, and `apply` then refuses outright, because pushing 7-field
+  shows back would strip 19 fields per show. This is a safety property, not a warning: do not relax it.
+- `apply` also refuses when a payload still holds `__REDACTED__` (a secret was not rehydrated), when
+  the station is mid-show without `--force-now`, and at tier 1 without `--no-backup`. It never deletes.
 - Deletes run only when the human asks, never as a side effect of a sync.
 - Never run a second stack against the same state dir.
 
@@ -111,19 +116,17 @@ python3 scripts/subwave.py status    # tier, station, on-air state, repo sync
 python3 scripts/subwave.py pull      # live -> instance/, secrets redacted (--force replaces)
 python3 scripts/subwave.py diff      # drift vs live, exit 1 when drifted
 python3 scripts/subwave.py backup    # settings.json + schedule.json, outside the repo
-```
-
-Planned, not implemented yet — design in `docs/PLAN.md`:
-
-```sh
-python3 scripts/subwave.py apply --dry-run   # print payloads, send nothing
+python3 scripts/subwave.py apply     # DRY RUN by default; --yes performs the writes
 ```
 
 ## Layout
 
-`instance/` is this deployment and is gitignored. Today it holds only `settings.json` and `schedule.json`,
-captured verbatim from the host. The `character/` layer — `character.json` for identity and house rules,
-`personas/*.json`, `shows/*.json`, and a per-slug `schedule.json` — **does not exist yet**; it arrives with
-the tool in P2, so do not go looking for those files. `examples/demo/` is a committed fictional station
-already in that target shape, so the repo is testable with no live station. `docs/PLAN.md` holds the design
-and phases, `docs/decision-log.md` the decisions, and `docs/applied.md` the on-air audit trail.
+`instance/` is this deployment and is gitignored: `settings.json` (secrets redacted),
+`character/character.json` for identity and house rules, `character/personas/*.json`,
+`character/shows/*.json`, `character/schedule.json` (the grid keyed by slug), and
+`ids.lock.json` — generated, never hand-edited, holding the slug→id map, the `capture`
+record `apply` checks, and the hash of the last applied payload.
+
+`examples/demo/` is a committed fictional station in the same shape, so the repo is testable
+with no live station. `docs/PLAN.md` holds the design and phases, `docs/decision-log.md` the
+decisions, and `docs/applied.md` the on-air audit trail.

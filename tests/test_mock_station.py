@@ -74,6 +74,13 @@ class ReadTests(MockTestCase):
         # the grid itself is fully readable
         self.assertEqual(sum(len(day) for day in payload["schedule"].values()), 168)
 
+    def test_personas_are_trimmed_to_four_fields(self):
+        status, payload = call(self.server, "/api/personas", auth=False)
+        self.assertEqual(status, 200)
+        persona = payload["personas"][0]
+        self.assertEqual(set(persona), {"id", "name", "tagline", "avatar"})
+        self.assertNotIn("soul", persona)
+
     def test_settings_requires_auth(self):
         status, _ = call(self.server, "/api/settings", auth=False)
         self.assertEqual(status, 401)

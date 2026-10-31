@@ -15,6 +15,7 @@ Configuration comes from the environment, with a repo-root .env as a fallback:
 import argparse
 import base64
 import copy
+import hashlib
 import json
 import os
 import re
@@ -155,11 +156,17 @@ class Config:
 # transports
 # --------------------------------------------------------------------------
 
-def http_json(config, path, admin=False, station=False, timeout=DEFAULT_TIMEOUT):
-    """GET a JSON endpoint. Returns (status_code, payload)."""
+def http_json(config, path, admin=False, station=False, method="GET", body=None,
+              timeout=DEFAULT_TIMEOUT):
+    """Call a JSON endpoint. Returns (status_code, payload)."""
     config.require_http()
     url = config.base_url + path
-    request = urllib.request.Request(url, method="GET")
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
     request.add_header("Accept", "application/json")
     if admin:
         if not (config.admin_user and config.admin_pass):
@@ -182,6 +189,8 @@ def http_json(config, path, admin=False, station=False, timeout=DEFAULT_TIMEOUT)
             detail = exc.read().decode("utf-8", "replace")[:200]
         except Exception:
             pass
+        finally:
+            exc.close()
         return exc.code, {"error": detail or exc.reason}
     except urllib.error.URLError as exc:
         raise ToolError("cannot reach %s (%s)" % (url, exc.reason))
@@ -358,9 +367,12 @@ def load_instance_model(root=None):
         persona = json.loads(path.read_text(encoding="utf-8"))
         personas[persona["id"]] = persona
     shows = {}
+    show_files = {}
     for path in sorted((root / "character" / "shows").glob("*.json")):
         show = json.loads(path.read_text(encoding="utf-8"))
-        shows[show["id"]] = show
+        show_files[path.stem] = show
+        # a show authored in the repo has no server id yet
+        shows[show.get("id") or ("new:%s" % path.stem)] = show
     schedule_doc = json.loads((root / "character" / "schedule.json").read_text(encoding="utf-8"))
     show_slugs = lock.get("shows") or {}
     grid = {
@@ -378,6 +390,7 @@ def load_instance_model(root=None):
             (root / "character" / "character.json").read_text(encoding="utf-8")),
         "personas": personas,
         "shows": shows,
+        "show_files": show_files,
         "grid": grid,
         "override": override,
         "activePersonaId": lock.get("activePersonaId"),
@@ -390,7 +403,7 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def write_instance(model, previous_lock=None):
+def write_instance(model, previous_lock=None, capture=None):
     """Write the character layer. Returns a summary dict."""
     previous_lock = previous_lock or {}
     persona_slugs = assign_slugs(list(model["personas"].values()),
@@ -424,6 +437,8 @@ def write_instance(model, previous_lock=None):
         "ids": {id_: slug for slug, id_ in list(persona_slugs.items()) + list(show_slugs.items())},
         "activePersonaId": model.get("activePersonaId"),
     }
+    if capture:
+        lock["capture"] = capture
     write_json(INSTANCE_DIR / "ids.lock.json", lock)
 
     cells = [cell for day in model["grid"].values() for cell in day]
@@ -659,7 +674,13 @@ def cmd_pull(config, args):
     model = build_live_model(settings, schedule)
     if model["settings"] is None:
         model["settings"] = {}
-    summary = write_instance(model, previous_lock)
+    capture = {
+        "tier": tier,
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "lossy": bool(losses),
+        "lost": list(losses),
+    }
+    summary = write_instance(model, previous_lock, capture)
 
     print("wrote     instance/ (%d files + ids.lock.json)" % summary["files"])
     print("redacted  %d of %d configured paths held a value -> %s"
@@ -706,12 +727,10 @@ def cmd_diff(config, args):
 
     if not (INSTANCE_DIR / "ids.lock.json").is_file():
         raise ToolError("no instance/ to compare (run: subwave.py pull)")
-    if tier != 2:
-        raise ToolError(
-            "diff needs host access: tier-1 reads are trimmed, so every comparison would be "
-            "a false drift report. Set SUBWAVE_HOST and SUBWAVE_STATE_DIR.")
 
     repo = load_instance_model()
+    if tier != 2:
+        return diff_trimmed(config, repo)
     settings = json.loads(read_state_file(config, "settings.json"))
     schedule = json.loads(read_state_file(config, "schedule.json"))
     live = build_live_model(settings, schedule)
@@ -724,15 +743,8 @@ def cmd_diff(config, args):
     return EXIT_OK if count == 0 else EXIT_DRIFT
 
 
-def cmd_backup(config, args):
-    tier, detail = detect_tier(config)
-    print("tier      %s" % TIER_LABEL[tier], flush=True)
-    if tier != 2:
-        raise ToolError(
-            "refusing to back up at tier 1: the API backup omits schedule.json entirely, and "
-            "/api/schedule returns shows trimmed to 7 of 26 fields, so a tier-1 backup could not "
-            "restore the programming. Add SUBWAVE_HOST and SUBWAVE_STATE_DIR for host access.")
-
+def take_backup(config, base_dir=None):
+    """Copy settings.json + schedule.json outside the repo. Returns (path, settings, schedule)."""
     settings_text = read_state_file(config, "settings.json")
     schedule_text = read_state_file(config, "schedule.json")
     settings = json.loads(settings_text)
@@ -740,7 +752,7 @@ def cmd_backup(config, args):
 
     station = settings.get("station") or "station"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    base = Path(args.dir).expanduser() if args.dir else Path.home() / ".subwave-backups"
+    base = Path(base_dir).expanduser() if base_dir else Path.home() / ".subwave-backups"
     destination = base / slugify(station) / stamp
 
     resolved = destination.resolve()
@@ -752,6 +764,69 @@ def cmd_backup(config, args):
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "settings.json").write_text(settings_text, encoding="utf-8")
     (destination / "schedule.json").write_text(schedule_text, encoding="utf-8")
+    return destination, settings, schedule
+
+
+def diff_trimmed(config, repo):
+    """Tier-1 comparison over the fields the API actually exposes."""
+    status, personas = http_json(config, "/api/personas")
+    status_schedule, schedule = http_json(config, "/api/schedule")
+    if status != 200 or status_schedule != 200:
+        raise ToolError("the API did not return the endpoints a trimmed diff needs")
+
+    live_personas = {p.get("id"): p for p in (personas.get("personas") or []) if p.get("id")}
+    live_shows = {s.get("id"): s for s in (schedule.get("shows") or []) if s.get("id")}
+
+    def visible_diff(repo_items, live_items):
+        added = sorted(set(repo_items) - set(live_items))
+        removed = sorted(set(live_items) - set(repo_items))
+        changed = []
+        for id_ in set(repo_items) & set(live_items):
+            live = live_items[id_]
+            repo_item = repo_items[id_]
+            # Only fields the repo object actually carries: a trimmed read can
+            # include derived keys (a single "mood") that no show document holds.
+            if any(repo_item[key] != value for key, value in live.items() if key in repo_item):
+                changed.append(id_)
+        return {"added": added, "removed": removed, "changed": sorted(changed),
+                "unchanged": sorted((set(repo_items) & set(live_items)) - set(changed))}
+
+    report = {"personas": visible_diff(repo["personas"], live_personas),
+              "shows": visible_diff(repo["shows"], live_shows)}
+
+    grid_changed = [day for day in sorted(set(repo["grid"]) | set(schedule.get("schedule") or {}))
+                    if (repo["grid"].get(day) or []) != ((schedule.get("schedule") or {}).get(day) or [])]
+    report["grid"] = {"changed_days": grid_changed, "unchanged": not grid_changed,
+                      "cells": sum(len(day) for day in (schedule.get("schedule") or {}).values())}
+    report["settings"] = {"changed": [], "keys": 0, "unchanged": True}
+    report["character"] = {"changed": [], "unchanged": True}
+    report["override"] = {"unchanged": repo.get("override") == schedule.get("override"),
+                          "repo": repo.get("override"), "live": schedule.get("override")}
+
+    print("note      trimmed comparison: 14 persona fields and 19 show fields are not "
+          "readable at tier 1, so they cannot drift here")
+    print_diff(report)
+    count = (len(report["personas"]["added"]) + len(report["personas"]["removed"])
+             + len(report["personas"]["changed"]) + len(report["shows"]["added"])
+             + len(report["shows"]["removed"]) + len(report["shows"]["changed"])
+             + len(report["grid"]["changed_days"]))
+    if not report["override"]["unchanged"]:
+        count += 1
+    print("result    %s" % ("in sync (readable fields)" if count == 0
+                            else "%d change(s) in the readable fields" % count))
+    return EXIT_OK if count == 0 else EXIT_DRIFT
+
+
+def cmd_backup(config, args):
+    tier, detail = detect_tier(config)
+    print("tier      %s" % TIER_LABEL[tier], flush=True)
+    if tier != 2:
+        raise ToolError(
+            "refusing to back up at tier 1: the API backup omits schedule.json entirely, and "
+            "/api/schedule returns shows trimmed to 7 of 26 fields, so a tier-1 backup could not "
+            "restore the programming. Add SUBWAVE_HOST and SUBWAVE_STATE_DIR for host access.")
+
+    destination, settings, schedule = take_backup(config, args.dir)
 
     shows = schedule.get("shows") or []
     cells = [cell for day in (schedule.get("schedule") or {}).values() for cell in day]
@@ -759,6 +834,261 @@ def cmd_backup(config, args):
     print("shows     %d" % len(shows))
     print("grid      %d/%d cells" % (sum(1 for cell in cells if cell), len(cells)))
     print("files     settings.json, schedule.json (unredacted, outside the repo)")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# apply: instance/ -> station
+# --------------------------------------------------------------------------
+
+def find_sentinels(node, path=""):
+    """Every path still holding the redaction sentinel."""
+    found = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            here = "%s.%s" % (path, key) if path else key
+            found += find_sentinels(value, here)
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            found += find_sentinels(value, "%s[%d]" % (path, index))
+    elif node == SENTINEL:
+        found.append(path)
+    return found
+
+
+def rehydrate(body, live_settings, config):
+    """Replace sentinels with real values in place. Returns paths we could not fill."""
+    remaining = []
+
+    def live_value(dotted):
+        node = live_settings
+        for key in dotted.split("."):
+            if not isinstance(node, dict) or key not in node:
+                return None
+            node = node[key]
+        return node if isinstance(node, str) and node else None
+
+    def walk(node, path=""):
+        if isinstance(node, dict):
+            for key in list(node):
+                value = node[key]
+                here = "%s.%s" % (path, key) if path else key
+                if isinstance(value, str) and value == SENTINEL:
+                    replacement = None
+                    if here == "privacy.password" and config.station_password:
+                        replacement = config.station_password
+                    elif here == "llm.apiKey" and os.environ.get("ANTHROPIC_API_KEY"):
+                        replacement = os.environ["ANTHROPIC_API_KEY"]
+                    elif live_settings is not None:
+                        replacement = live_value(here)
+                    if replacement:
+                        node[key] = replacement
+                    else:
+                        remaining.append(here)
+                elif isinstance(value, (dict, list)):
+                    walk(value, here)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, "%s[%d]" % (path, index))
+
+    walk(body)
+    return remaining
+
+
+def build_steps(model, lock):
+    """Whole objects from the repo. Personas and settings first, shows second."""
+    steps = []
+    personas = list((model.get("personas") or {}).values())
+    if personas:
+        body = {"personas": personas}
+        if model.get("activePersonaId"):
+            body["activePersonaId"] = model["activePersonaId"]
+        steps.append({"method": "POST", "path": "/api/settings", "entity": "settings",
+                      "label": "personas + activePersonaId", "body": body,
+                      "note": "%d personas" % len(personas)})
+    settings = model.get("settings") or {}
+    if settings:
+        steps.append({"method": "POST", "path": "/api/settings", "entity": "settings",
+                      "label": "settings sections", "body": copy.deepcopy(settings),
+                      "note": "%d top-level keys" % len(settings)})
+    for slug, show in sorted((model.get("show_files") or {}).items()):
+        steps.append({"method": "POST", "path": "/api/shows", "entity": "show",
+                      "slug": slug, "label": "show %s" % slug,
+                      "body": {"show": copy.deepcopy(show)},
+                      "note": "%d fields" % len(show)})
+    return steps
+
+
+def build_grid(model, lock):
+    """The grid by server id, plus any cell we cannot resolve yet."""
+    known = set((lock.get("shows") or {}).values())
+    grid = {}
+    unresolved = []
+    for day, cells in (model.get("grid") or {}).items():
+        resolved = []
+        for cell in cells:
+            if not cell:
+                resolved.append(None)
+            elif cell in known:
+                resolved.append(cell)
+            else:
+                unresolved.append(cell)
+                resolved.append(cell)
+        grid[day] = resolved
+    override = model.get("override")
+    if override:
+        override = override if override in known else None
+    return {"schedule": grid, "override": override}, sorted(set(unresolved))
+
+
+def payload_hash(steps, grid_body):
+    blob = json.dumps(
+        {"steps": [{"method": step["method"], "path": step["path"], "body": step["body"]}
+                   for step in steps],
+         "grid": grid_body},
+        sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def send_step(config, step):
+    status, payload = http_json(config, step["path"], admin=True,
+                                method=step["method"], body=step["body"])
+    if status == 401:
+        raise ToolError(
+            "authentication failed (HTTP 401) on %s %s: check SUBWAVE_ADMIN_USER and "
+            "SUBWAVE_ADMIN_PASS" % (step["method"], step["path"]))
+    if status >= 400:
+        detail = ""
+        if isinstance(payload, dict):
+            detail = payload.get("error") or json.dumps(payload)[:200]
+        raise ToolError("%s %s failed: HTTP %s %s"
+                        % (step["method"], step["path"], status, detail))
+    return status, payload
+
+
+def persist_new_id(step, payload, lock):
+    """Write a server-assigned id back into the show file and the lockfile."""
+    show = (payload or {}).get("show") or {}
+    new_id = show.get("id")
+    sent = (step.get("body") or {}).get("show") or {}
+    if not new_id or sent.get("id") == new_id:
+        return None
+    slug = step.get("slug")
+    path = INSTANCE_DIR / "character" / "shows" / ("%s.json" % slug)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["id"] = new_id
+    write_json(path, document)
+    lock.setdefault("shows", {})[slug] = new_id
+    lock.setdefault("ids", {})[new_id] = slug
+    write_json(INSTANCE_DIR / "ids.lock.json", lock)
+    return slug, new_id
+
+
+def cmd_apply(config, args):
+    tier, detail = detect_tier(config)
+    print("tier      %s" % TIER_LABEL[tier], flush=True)
+
+    if args.prune:
+        raise ToolError("--prune is designed but not implemented: apply never deletes.")
+
+    lock_path = INSTANCE_DIR / "ids.lock.json"
+    if not lock_path.is_file():
+        raise ToolError("no instance/ to apply (run: subwave.py pull)")
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+
+    capture = lock.get("capture") or {}
+    if capture.get("lossy"):
+        lost = "; ".join(capture.get("lost") or []) or "unknown"
+        raise ToolError(
+            "refusing to apply a lossy capture (tier %s): %s. A show trimmed to 7 fields pushed "
+            "back would strip 19 fields per show on the live station. Re-pull with host access."
+            % (capture.get("tier"), lost))
+
+    model = load_instance_model()
+    live_settings = None
+    if tier == 2:
+        live_settings = json.loads(read_state_file(config, "settings.json"))
+
+    steps = build_steps(model, lock)
+    remaining = []
+    for step in steps:
+        remaining += rehydrate(step["body"], live_settings, config)
+    if remaining:
+        raise ToolError(
+            "refusing to apply: %d secret path(s) still hold %s (%s). Writing that would "
+            "overwrite a real credential with a placeholder. At tier 1 only "
+            "SUBWAVE_STATION_PASSWORD and ANTHROPIC_API_KEY can be rehydrated; use host access "
+            "for the rest." % (len(set(remaining)), SENTINEL, ", ".join(sorted(set(remaining)))))
+
+    grid_body, unresolved = build_grid(model, lock)
+
+    if not args.yes:
+        print("mode      dry run - nothing is sent")
+        for index, step in enumerate(steps, start=1):
+            print("step %-4d %s %-14s %-28s (%s)"
+                  % (index, step["method"], step["path"], step["label"], step["note"]))
+        cells = sum(len(day) for day in grid_body["schedule"].values())
+        print("step %-4d %s %-14s %-28s (%d cells%s)"
+              % (len(steps) + 1, "PUT", "/api/schedule", "grid", cells,
+                 "" if not unresolved else ", %d unresolved" % len(unresolved)))
+        if unresolved:
+            print("unresolved  %s - new shows get ids on the write, then the grid resolves"
+                  % ", ".join(unresolved))
+        print("guards    lossy capture: no; sentinel: no; mid-show check and backup happen on --yes")
+        print("result    %d step(s) prepared, 0 requests sent" % (len(steps) + 1))
+        return EXIT_OK
+
+    if not args.force_now:
+        status, now = http_json(config, "/api/now-playing")
+        active = (now or {}).get("activeShow") or {}
+        if status == 200 and active.get("name"):
+            raise ToolError(
+                "the station is mid-show (%s). Writing into a live programme is not the "
+                "default: pass --force-now if that is intended." % active.get("name"))
+
+    if args.no_backup:
+        print("backup    skipped (--no-backup)")
+    elif tier == 2:
+        destination, _, _ = take_backup(config, args.backup_dir)
+        print("backup    %s" % destination)
+    else:
+        raise ToolError(
+            "refusing to write at tier 1 without a backup: a tier-1 backup cannot include the "
+            "schedule or the full show definitions, so this write would be unprotected. Pass "
+            "--no-backup to accept that explicitly.")
+
+    digest = payload_hash(steps, grid_body)
+    applied = lock.get("applied") or {}
+    if applied.get("hash") == digest:
+        print("result    no changes since the last apply (%s)" % applied.get("at"))
+        return EXIT_OK
+
+    for step in steps:
+        status, payload = send_step(config, step)
+        print("wrote     %s %-14s %-28s -> HTTP %s"
+              % (step["method"], step["path"], step["label"], status))
+        if step["entity"] == "show":
+            assigned = persist_new_id(step, payload, lock)
+            if assigned:
+                print("id        %s -> %s (assigned by the station)" % assigned)
+
+    # The grid can only be written once every show it references has an id.
+    model = load_instance_model()
+    grid_body, unresolved = build_grid(model, lock)
+    if unresolved:
+        raise ToolError("cannot write the grid: %d cell(s) reference unknown shows (%s)"
+                        % (len(unresolved), ", ".join(unresolved)))
+    status, _ = send_step(config, {"method": "PUT", "path": "/api/schedule",
+                                   "body": grid_body, "label": "grid"})
+    print("wrote     PUT %-14s %-28s -> HTTP %s" % ("/api/schedule", "grid", status))
+
+    lock["applied"] = {
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "hash": payload_hash(build_steps(model, lock), grid_body),
+        "tier": tier,
+    }
+    write_json(lock_path, lock)
+    print("result    %d step(s) written; ids.lock.json updated" % (len(steps) + 1))
     return EXIT_OK
 
 
@@ -780,6 +1110,15 @@ def build_parser():
 
     diff = sub.add_parser("diff", help="read-only drift report")
     diff.set_defaults(func=cmd_diff)
+
+    apply_cmd = sub.add_parser("apply", help="push instance/ to the station (dry run by default)")
+    apply_cmd.add_argument("--yes", action="store_true", help="perform the writes")
+    apply_cmd.add_argument("--dry-run", action="store_true", help="explicit dry run (the default)")
+    apply_cmd.add_argument("--force-now", action="store_true", help="write even while on air")
+    apply_cmd.add_argument("--no-backup", action="store_true", help="write without a backup")
+    apply_cmd.add_argument("--backup-dir", help="where to put the pre-apply backup")
+    apply_cmd.add_argument("--prune", action="store_true", help="reserved; not implemented")
+    apply_cmd.set_defaults(func=cmd_apply)
 
     backup = sub.add_parser("backup", help="copy settings.json + schedule.json outside the repo")
     backup.add_argument("--dir", help="base directory (default ~/.subwave-backups)")

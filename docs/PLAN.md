@@ -132,9 +132,15 @@ Python 3 stdlib only — no third-party deps, so the toolkit runs anywhere an ag
 | **P0 — capture** *(done)* | `.gitignore` first, then verbatim `settings.json` + `schedule.json` into `instance/` | instance files parse; 6 shows; 168/168 cells; `git status` and `git ls-files` never mention `instance/` |
 | **P1 — read-only tool** *(done)* | `status`, `pull`, `diff`, `backup`, tier detection, unit tests | `diff` reports clean straight after `pull`; tier 1 refuses or states exactly what it loses; `python3 -m unittest discover -s tests` green |
 | **P2 — character authoring** | character layer files, slug↔id lockfile, splitting/reassembly | `pull` round-trips `instance/` byte-identically (modulo redaction) |
-| **P3 — apply** | ordered writes, dry-run, audit row, secret-preserving merge | `apply --dry-run` reviewed; first real apply is one section, off-air, logged in `docs/applied.md` |
+| **P3 — apply** *(done, mock-verified)* | ordered writes, dry run by default, lossy/sentinel/mid-show/backup guards, id assignment | proven against `tests/mock_station.py`: dry run sends nothing, shows sent whole, grid last, second apply a no-op. **Not yet run against the live station** |
 | **P4 — skills** | `skills/<name>/SKILL.md`: new show, diagnose a host, backup, schedule review | an agent completes each task from the skill alone, at the tier it announces |
 | **P5 — public readiness** | scrub, LICENSE, branch protection, repo settings | **human only**; the agent prepares a checklist and changes nothing on GitHub |
+
+**P3 is done against the mock and has never touched the live station.** `apply` refuses a lossy
+capture outright, refuses a payload still holding `__REDACTED__`, refuses mid-show without
+`--force-now`, and refuses at tier 1 without `--no-backup`. It sends whole objects only, writes
+personas and settings before shows and the grid last, and never deletes (`--prune` is reserved and
+unimplemented).
 
 **P1 is done, and it does not write.** It ships `status`, `pull`, `diff` and `backup`. It does not
 apply anything, does not create, update or delete a persona, show, setting or grid cell, and cannot

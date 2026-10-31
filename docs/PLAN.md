@@ -120,6 +120,10 @@ scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE
   Authoring (`blocklist block|unblock|rm|rule`) edits the repo only; `apply` writes entries and rules
   after the grid, treats a 409 "already blocked" as success, and never deletes. Rule identity is a
   toolkit-owned slug locked to the station's uuid, so a re-apply updates rather than duplicates.
+- **`apply --prune`** deletes station entities absent from the repo, and only under that explicit flag.
+  Dry by default, backup mandatory, after the writes and after verification. A show occupying grid cells
+  or a persona hosting a show is refused unless `--force-prune`; the active persona, the last persona and
+  the last show are refused outright. Pending blocklist rules are deleted here, by uuid.
 - **`restore`** is the other half of `backup`: dry run by default, state files first then assets,
   refuses a backup that is incomplete or whose grid does not resolve, refuses while on air unless
   `--force-now`, verifies the written station and rolls back to the previous state if it does not

@@ -1287,6 +1287,12 @@ def take_backup(config, base_dir=None, state=None, with_library=False):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     base = Path(base_dir).expanduser() if base_dir else Path.home() / ".subwave-backups"
     destination = base / slugify(station) / stamp
+    # Two backups in the same second must not collide: the stamp is per second
+    # and a prune always backs up before deleting.
+    suffix = 2
+    while destination.exists():
+        destination = base / slugify(station) / ("%s-%d" % (stamp, suffix))
+        suffix += 1
 
     resolved = destination.resolve()
     if resolved == REPO_ROOT or REPO_ROOT in resolved.parents:
@@ -1752,12 +1758,176 @@ def apply_blocklist(config, document, lock):
     return lock
 
 
+# --------------------------------------------------------------------------
+# prune: the only destructive operation in the toolkit
+#
+# Entities present on the STATION but absent from the repo are removed. It is
+# opt-in, never implied by a plain apply, dry by default, and always preceded by
+# a backup. The station's delete routes have no undo - a re-added rule gets a new
+# uuid, a deleted persona's shows lose their host - so a cascade is never silent.
+# --------------------------------------------------------------------------
+
+DAY_LABELS = {0: "sun", 1: "mon", 2: "tue", 3: "wed", 4: "thu", 5: "fri", 6: "sat"}
+
+
+def _grid_cells_for(show_id, grid):
+    """(day, hour) pairs where this show occupies a cell."""
+    cells = []
+    for day, row in (grid or {}).items():
+        for hour, cell in enumerate(row or []):
+            if cell == show_id:
+                cells.append((str(day), hour))
+    return cells
+
+
+def prune_plan(config, model, blocklist_lock, settings_now=None, schedule_now=None):
+    """What a prune would delete, what stands in the way, and what cannot be undone.
+
+    Takes the station documents as they were BEFORE the writes. The grid write
+    clears any cell that is not in the repo, so reading the grid afterwards would
+    always report "occupies nothing" and the guard would never fire.
+    """
+    if settings_now is None:
+        settings_now = json.loads(read_state_file(config, "settings.json"))
+    if schedule_now is None:
+        schedule_now = json.loads(read_state_file(config, "schedule.json"))
+
+    live_personas = {p.get("id"): p for p in (settings_now.get("personas") or []) if p.get("id")}
+    live_shows = {s.get("id"): s for s in (schedule_now.get("shows") or []) if s.get("id")}
+    grid = schedule_now.get("schedule") or {}
+
+    repo_personas = {id_ for id_ in (model.get("personas") or {}) if not id_.startswith("new:")}
+    repo_shows = {id_ for id_ in (model.get("shows") or {}) if not id_.startswith("new:")}
+
+    shows = {id_: show for id_, show in live_shows.items() if id_ not in repo_shows}
+    personas = {id_: persona for id_, persona in live_personas.items()
+                if id_ not in repo_personas}
+
+    hard, blocked, items = [], [], []
+
+    active = settings_now.get("activePersonaId")
+    if active in personas:
+        hard.append("persona %r is the active persona; a station with no DJ cannot be pruned"
+                    % (personas[active].get("name") or active))
+        personas.pop(active, None)
+
+    if personas and len(live_personas) - len(personas) == 0:
+        hard.append("refusing to delete every persona: a station with no persona has no DJ")
+        personas = {}
+
+    if shows and len(live_shows) - len(shows) == 0:
+        hard.append("refusing to delete the last show: the grid would have nothing to schedule")
+        shows = {}
+
+    for id_, show in sorted(shows.items()):
+        cells = _grid_cells_for(id_, grid)
+        label = show.get("name") or id_
+        if cells:
+            where = ", ".join("%s %02d:00" % (DAY_LABELS[int(day)], hour) for day, hour in cells)
+            blocked.append("show %r occupies %d grid cell(s): %s" % (label, len(cells), where))
+        items.append({"kind": "show", "id": id_, "label": label, "cells": cells})
+
+    for id_, persona in sorted(personas.items()):
+        hosts = [show.get("name") or show.get("id")
+                 for show in live_shows.values() if show.get("personaId") == id_]
+        if hosts:
+            blocked.append("persona %r hosts %d show(s): %s"
+                           % (persona.get("name") or id_, len(hosts), ", ".join(hosts)))
+        items.append({"kind": "persona", "id": id_, "label": persona.get("name") or id_,
+                      "hosts": hosts})
+
+    rules = []
+    for slug in pending_removals(load_repo_blocklist(), blocklist_lock):
+        uuid = (blocklist_lock.get("rules") or {}).get(slug)
+        if uuid:
+            rules.append({"kind": "rule", "id": uuid, "label": slug, "slug": slug})
+            items.append(rules[-1])
+
+    return {"items": items, "hard": hard, "blocked": blocked}
+
+
+def print_prune_plan(plan, dry_run):
+    for item in plan["items"]:
+        if item["kind"] == "show":
+            detail = ("occupies %d cell(s)" % len(item["cells"])) if item["cells"] else \
+                     "in no grid cell"
+        elif item["kind"] == "persona":
+            detail = ("hosts %s" % ", ".join(item["hosts"])) if item["hosts"] else "hosts nothing"
+        else:
+            detail = "pending removal in blocklist.lock.json"
+        print("delete    %-8s %-24s (%s)" % (item["kind"], item["label"], detail))
+    for line in plan["blocked"]:
+        print("blocked   %s" % line)
+    for line in plan["hard"]:
+        print("refused   %s" % line)
+
+
+def clear_show_cells(show_ids, lock):
+    """After a forced show delete, empty its cells in the repo so the next apply agrees."""
+    path = INSTANCE_DIR / "character" / "schedule.json"
+    if not path.is_file():
+        return 0
+    document = json.loads(path.read_text(encoding="utf-8"))
+    id_to_slug = {uuid: slug for slug, uuid in (lock.get("shows") or {}).items()}
+    slugs = {id_to_slug.get(id_, id_) for id_ in show_ids}
+    cleared = 0
+    for day, row in (document.get("schedule") or {}).items():
+        for hour, cell in enumerate(row or []):
+            if cell in slugs:
+                row[hour] = None
+                cleared += 1
+    if cleared:
+        write_json(path, document)
+    return cleared
+
+
+def run_prune(config, plan, force):
+    """Delete, one entity at a time, printing each. Returns the number deleted."""
+    deleted = 0
+    for item in plan["items"]:
+        if item["kind"] == "show":
+            status, _ = http_json(config, "/api/shows/%s" % item["id"], admin=True,
+                                  method="DELETE")
+            if status >= 400:
+                raise ToolError("DELETE /api/shows/%s failed: HTTP %s" % (item["id"], status))
+            print("deleted   show %r" % item["label"])
+            if item["cells"]:
+                ids_lock = json.loads(
+                    (INSTANCE_DIR / "ids.lock.json").read_text(encoding="utf-8"))
+                cleared = clear_show_cells([item["id"]], ids_lock)
+                print("cleared   %d grid cell(s) that pointed at it, in the repo" % cleared)
+            deleted += 1
+        elif item["kind"] == "persona":
+            status, _ = http_json(config, "/api/personas/%s" % item["id"], admin=True,
+                                  method="DELETE")
+            if status >= 400:
+                raise ToolError("DELETE /api/personas/%s failed: HTTP %s" % (item["id"], status))
+            print("deleted   persona %r" % item["label"])
+            if item["hosts"]:
+                print("dangling  %s now has no host; validate will report it"
+                      % ", ".join(item["hosts"]))
+            deleted += 1
+        else:
+            status, _ = http_json(config, "/api/library/blocklist/rules/%s" % item["id"],
+                                  admin=True, method="DELETE")
+            if status >= 400:
+                raise ToolError("DELETE /api/library/blocklist/rules/%s failed: HTTP %s"
+                                % (item["id"], status))
+            print("deleted   blocklist rule %r (pending removal)" % item["label"])
+            deleted += 1
+    return deleted
+
+
 def cmd_apply(config, args):
     tier, detail = detect_tier(config)
     print("tier      %s" % TIER_LABEL[tier], flush=True)
 
-    if args.prune:
-        raise ToolError("--prune is designed but not implemented: apply never deletes.")
+    if args.prune and args.no_backup:
+        raise ToolError("--prune cannot run with --no-backup: deleting on the station has no undo, "
+                        "so a backup is mandatory. Drop --no-backup.")
+    if args.prune and tier != 2:
+        raise ToolError("--prune needs host access: a tier-1 backup cannot be taken, and a delete "
+                        "without one is not offered.")
 
     lock_path = INSTANCE_DIR / "ids.lock.json"
     if not lock_path.is_file():
@@ -1813,6 +1983,10 @@ def cmd_apply(config, args):
             print("unresolved  %s - new shows get ids on the write, then the grid resolves"
                   % ", ".join(unresolved))
         print("guards    lossy capture: no; sentinel: no; mid-show check and backup happen on --yes")
+        if args.prune:
+            plan = prune_plan(config, load_instance_model(), load_blocklist_lock())
+            print("prune     %d deletion(s) planned" % len(plan["items"]))
+            print_prune_plan(plan, dry_run=True)
         print("result    %d step(s) prepared, 0 requests sent" % (len(steps) + 1))
         return EXIT_OK
 
@@ -1837,11 +2011,19 @@ def cmd_apply(config, args):
 
     repo_blocklist = load_repo_blocklist()
     blocklist_lock = load_blocklist_lock()
+    prune_settings_before = prune_schedule_before = None
+    if args.prune:
+        prune_settings_before = json.loads(read_state_file(config, "settings.json"))
+        prune_schedule_before = json.loads(read_state_file(config, "schedule.json"))
+
     digest = payload_hash(steps, grid_body, repo_blocklist)
     applied = lock.get("applied") or {}
-    if applied.get("hash") == digest:
+    if applied.get("hash") == digest and not args.prune:
         print("result    no changes since the last apply (%s)" % applied.get("at"))
         return EXIT_OK
+    if applied.get("hash") == digest:
+        # Nothing to write, but a prune was asked for: fall through to it.
+        print("result    no changes to write")
 
     for step in steps:
         status, payload = send_step(config, step)
@@ -1890,6 +2072,28 @@ def cmd_apply(config, args):
             "the station did not store what was sent, so the change did NOT land:\n  %s%s"
             % ("\n  ".join(shown), more))
     print("result    %d step(s) written; ids.lock.json updated" % (len(steps) + 1))
+
+    # Prune last, after the writes and after verification: a failed write must
+    # never trigger a delete, and verification raising stops us before this line.
+    if args.prune:
+        plan = prune_plan(config, load_instance_model(), blocklist_lock,
+                          settings_now=prune_settings_before,
+                          schedule_now=prune_schedule_before)
+        print("prune     %d deletion(s) planned" % len(plan["items"]))
+        print_prune_plan(plan, dry_run=False)
+        if plan["hard"]:
+            raise ToolError(
+                "refusing to prune: %s. The writes above were applied; nothing was deleted."
+                % plan["hard"][0])
+        if plan["blocked"] and not args.force_prune:
+            raise ToolError(
+                "refusing to prune: %s. The writes above were applied; nothing was deleted. "
+                "Pass --force-prune to delete anyway." % plan["blocked"][0])
+        if not plan["items"]:
+            print("result    nothing to prune")
+            return EXIT_OK
+        deleted = run_prune(config, plan, args.force_prune)
+        print("result    %d deletion(s) done" % deleted)
     return EXIT_OK
 
 
@@ -3217,7 +3421,10 @@ def build_parser():
     apply_cmd.add_argument("--force-now", action="store_true", help="write even while on air")
     apply_cmd.add_argument("--no-backup", action="store_true", help="write without a backup")
     apply_cmd.add_argument("--backup-dir", help="where to put the pre-apply backup")
-    apply_cmd.add_argument("--prune", action="store_true", help="reserved; not implemented")
+    apply_cmd.add_argument("--prune", action="store_true",
+                           help="also delete entities that exist on the station but not in the repo")
+    apply_cmd.add_argument("--force-prune", action="store_true",
+                           help="delete even when a grid cell or a hosted show depends on it")
     apply_cmd.set_defaults(func=cmd_apply)
 
     restore = sub.add_parser("restore", help="put a backup back (dry run by default)")

@@ -146,10 +146,12 @@ class WriteTests(ApplyTestCase):
         writes = [e for e in self.log() if e["method"] != "GET"]
         self.assertEqual(writes, [], "nothing may be written while refusing")
 
-    def test_prune_is_not_implemented(self):
+    def test_prune_refuses_without_a_backup(self):
+        # Deleting on the station has no undo, so a backup is mandatory.
         with self.assertRaises(subwave.ToolError) as caught:
-            self.run_apply(yes=True, prune=True)
-        self.assertIn("not implemented", str(caught.exception))
+            self.run_apply(yes=True, prune=True, no_backup=True)
+        self.assertIn("--no-backup", str(caught.exception))
+        self.assertIn("backup is mandatory", str(caught.exception))
 
 
 class AuthTests(ApplyTestCase):

@@ -13,6 +13,7 @@ proven without touching a live station:
   POST /api/library/blocklist  admin; block an entry; 409 when already blocked
   POST /api/library/blocklist/rules      admin; mint a rule uuid
   PUT  /api/library/blocklist/rules/:id  admin; update a rule by uuid
+  DELETE /api/shows/:id, /api/personas/:id, /api/library/blocklist/rules/:id  admin
   GET  /api/settings        admin; the 19-key UI summary, NOT settings.json
   POST /api/settings        admin; SHALLOW merge - a top-level key replaces wholesale
   POST /api/shows           admin; upsert by show.id, assigns an id when absent,
@@ -170,6 +171,30 @@ class Station:
                 self.blocklist["rules"][index] = updated
                 return 200, updated
         return 404, {"error": "no such rule"}
+
+    def delete_show(self, show_id):
+        before = len(self.schedule.get("shows") or [])
+        self.schedule["shows"] = [show for show in (self.schedule.get("shows") or [])
+                                  if show.get("id") != show_id]
+        if len(self.schedule["shows"]) == before:
+            return 404, {"error": "no such show"}
+        return 200, {"ok": True}
+
+    def delete_persona(self, persona_id):
+        before = len(self.settings.get("personas") or [])
+        self.settings["personas"] = [persona for persona in (self.settings.get("personas") or [])
+                                     if persona.get("id") != persona_id]
+        if len(self.settings["personas"]) == before:
+            return 404, {"error": "no such persona"}
+        return 200, {"ok": True}
+
+    def delete_rule(self, rule_id):
+        before = len(self.blocklist.get("rules") or [])
+        self.blocklist["rules"] = [rule for rule in (self.blocklist.get("rules") or [])
+                                   if rule.get("id") != rule_id]
+        if len(self.blocklist["rules"]) == before:
+            return 404, {"error": "no such rule"}
+        return 200, {"ok": True}
 
     def public_blocklist(self):
         """The stored document plus the live fields the API adds."""
@@ -411,6 +436,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.station.record("POST", path, body, True)
             code, payload = self.station.upsert_show((body or {}).get("show"))
+            return self._send(code, payload)
+        return self._send(404, {"error": "not found", "path": path})
+
+    def do_DELETE(self):
+        path = urlsplit(self.path).path
+        if path.startswith("/api/library/blocklist/rules/"):
+            if not self._admin("DELETE", path, None):
+                return
+            self.station.record("DELETE", path, None, True)
+            code, payload = self.station.delete_rule(path.rsplit("/", 1)[-1])
+            return self._send(code, payload)
+        if path.startswith("/api/shows/"):
+            if not self._admin("DELETE", path, None):
+                return
+            self.station.record("DELETE", path, None, True)
+            code, payload = self.station.delete_show(path.rsplit("/", 1)[-1])
+            return self._send(code, payload)
+        if path.startswith("/api/personas/"):
+            if not self._admin("DELETE", path, None):
+                return
+            self.station.record("DELETE", path, None, True)
+            code, payload = self.station.delete_persona(path.rsplit("/", 1)[-1])
             return self._send(code, payload)
         return self._send(404, {"error": "not found", "path": path})
 

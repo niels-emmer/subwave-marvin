@@ -5,6 +5,7 @@ No test here contacts a live station: every request goes to a loopback mock.
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -127,11 +128,14 @@ class WriteTests(ApplyTestCase):
         persona = settings_posts[0]["body"]["personas"][0]
         self.assertEqual(len(persona), 18)
 
-    def test_grid_is_written_last_and_references_real_ids(self):
+    def test_the_grid_is_written_after_the_shows_and_references_real_ids(self):
         self.run_apply(yes=True)
-        paths = [entry["path"] for entry in self.log()]
-        self.assertEqual(paths[-1], "/api/schedule")
-        self.assertLess(paths.index("/api/shows"), len(paths) - 1)
+        # Not "last": the blocklist and skills are written after the grid, and the
+        # read-backs come after those. The invariant is that the grid is written
+        # only once every show it names exists on the station.
+        writes = [entry["path"] for entry in self.log() if entry["method"] != "GET"]
+        self.assertIn("/api/schedule", writes)
+        self.assertLess(writes.index("/api/shows"), writes.index("/api/schedule"))
 
         grid = [entry for entry in self.log() if entry["path"] == "/api/schedule"][0]["body"]
         cells = [cell for day in grid["schedule"].values() for cell in day]
@@ -359,6 +363,238 @@ class IdempotenceTests(ApplyTestCase):
         self.assertEqual(code, 0)
         self.assertIn("no changes", output)
         self.assertEqual(len(self.log()), first)
+
+
+class CrossReferenceRefusalTests(ApplyTestCase):
+    def test_a_show_whose_host_does_not_exist_never_reaches_the_station(self):
+        path = subwave.INSTANCE_DIR / "character" / "shows" / "late-harbour.json"
+        document = json.loads(path.read_text())
+        document["personaId"] = "p_ghost"
+        path.write_text(json.dumps(document, indent=2))
+
+        with self.assertRaises(subwave.ToolError) as caught:
+            self.run_apply(yes=True)
+        self.assertIn("p_ghost", str(caught.exception))
+        self.assertEqual([entry for entry in self.log() if entry["method"] != "GET"], [],
+                         "a show with no host must not be written")
+
+
+class OverrideTests(ApplyTestCase):
+    def set_override(self, slug):
+        path = subwave.INSTANCE_DIR / "character" / "schedule.json"
+        document = json.loads(path.read_text())
+        document["override"] = slug
+        path.write_text(json.dumps(document, indent=2))
+
+    def show_slug(self):
+        lock = json.loads((subwave.INSTANCE_DIR / "ids.lock.json").read_text())
+        return sorted(lock["shows"])[0]
+
+    def test_a_dangling_override_is_refused_before_any_write(self):
+        self.set_override("no-such-show")
+        with self.assertRaises(subwave.ToolError) as caught:
+            self.run_apply(yes=True)
+        self.assertIn("no-such-show", str(caught.exception))
+        self.assertEqual([entry for entry in self.log() if entry["method"] != "GET"], [])
+
+    def test_the_override_is_written_as_the_show_id(self):
+        slug = self.show_slug()
+        self.set_override(slug)
+        code, output = self.run_apply(yes=True)
+        self.assertEqual(code, 0, output)
+
+        lock = json.loads((subwave.INSTANCE_DIR / "ids.lock.json").read_text())
+        sent = [entry for entry in self.log() if entry["path"] == "/api/schedule"][0]["body"]
+        self.assertEqual(sent["override"], lock["shows"][slug])
+        self.assertEqual(self.server.station.schedule["override"], lock["shows"][slug])
+
+    def test_a_station_that_clears_the_override_is_caught(self):
+        self.set_override(self.show_slug())
+        original = self.server.station.replace_schedule
+
+        def drops_override(body):
+            code, payload = original(body)
+            if isinstance(body, dict) and "override" in body:
+                self.server.station.schedule["override"] = None
+            return code, payload
+
+        self.server.station.replace_schedule = drops_override
+        with self.assertRaises(subwave.ToolError) as caught:
+            self.run_apply(yes=True)
+        message = str(caught.exception)
+        self.assertIn("did NOT land", message)
+        self.assertIn("override", message)
+
+    def test_build_grid_raises_rather_than_dropping_an_unknown_override(self):
+        model = subwave.load_instance_model()
+        model["override"] = "no-such-show"
+        lock = json.loads((subwave.INSTANCE_DIR / "ids.lock.json").read_text())
+        with self.assertRaises(subwave.ToolError) as caught:
+            subwave.build_grid(model, lock)
+        self.assertIn("no-such-show", str(caught.exception))
+
+
+class BlocklistVerificationTests(ApplyTestCase):
+    """The blocklist is written like any other document, so it is read back."""
+
+    def test_the_blocklist_is_read_back_after_the_writes(self):
+        code, output = self.run_apply(yes=True)
+        self.assertEqual(code, 0, output)
+
+        log = self.log()
+        writes = [index for index, entry in enumerate(log)
+                  if entry["method"] in ("POST", "PUT")
+                  and entry["path"].startswith("/api/library/blocklist")]
+        reads = [index for index, entry in enumerate(log)
+                 if entry["method"] == "GET" and entry["path"] == "/api/library/blocklist"]
+        self.assertTrue(writes, "the blocklist must actually be written")
+        self.assertTrue(reads, "the blocklist must be read back")
+        self.assertGreater(reads[-1], writes[-1],
+                           "the read-back must come after the last blocklist write")
+
+    def test_a_station_that_ignores_a_blocklist_write_is_caught(self):
+        path = subwave.INSTANCE_DIR / subwave.BLOCKLIST_FILE
+        document = json.loads(path.read_text())
+        document.setdefault("entries", []).append(
+            {"type": "track", "id": "tr-999", "name": "Ghost Track"})
+        path.write_text(json.dumps(document, indent=2))
+
+        # Accepts the write, stores nothing: the failure this check exists for.
+        self.server.station.add_blocklist_entry = lambda body: (200, dict(body or {}))
+
+        with self.assertRaises(subwave.ToolError) as caught:
+            self.run_apply(yes=True)
+        message = str(caught.exception)
+        self.assertIn("did NOT land", message)
+        self.assertIn("tr-999", message)
+
+
+class Tier1VerificationTests(ApplyTestCase):
+    """Tier 1 cannot read settings.json, so it says what it did and did not prove."""
+
+    def test_the_visible_persona_fields_are_read_back(self):
+        code, output = self.run_apply(yes=True)
+        self.assertEqual(code, 0, output)
+
+        log = self.log()
+        settings_writes = [index for index, entry in enumerate(log)
+                           if entry["method"] == "POST" and entry["path"] == "/api/settings"]
+        reads = [index for index, entry in enumerate(log)
+                 if entry["method"] == "GET" and entry["path"] == "/api/personas"]
+        self.assertTrue(reads, "tier 1 must read the personas back")
+        self.assertGreater(reads[-1], settings_writes[-1])
+
+    def test_it_says_settings_were_not_verified(self):
+        code, output = self.run_apply(yes=True)
+        self.assertEqual(code, 0, output)
+        self.assertIn("NOT verified", output)
+        self.assertIn("/api/personas", output)
+
+    def test_a_station_that_ignores_a_persona_rename_is_caught(self):
+        path = sorted((subwave.INSTANCE_DIR / "character" / "personas").glob("*.json"))[0]
+        document = json.loads(path.read_text())
+        document["name"] = "Ghost Host"
+        path.write_text(json.dumps(document, indent=2))
+
+        original = self.server.station.merge_settings
+
+        def drops_personas(body):
+            return original({key: value for key, value in body.items() if key != "personas"})
+
+        self.server.station.merge_settings = drops_personas
+        with self.assertRaises(subwave.ToolError) as caught:
+            self.run_apply(yes=True)
+        message = str(caught.exception)
+        self.assertIn("did NOT land", message)
+        self.assertIn("Ghost Host", message)
+
+
+class DigestTests(ApplyTestCase):
+    """The applied digest must not be a hash of a live credential."""
+
+    def mark_password_secret(self):
+        path = subwave.INSTANCE_DIR / "settings.json"
+        document = json.loads(path.read_text())
+        document["privacy"]["password"] = subwave.SENTINEL
+        path.write_text(json.dumps(document, indent=2))
+
+    def test_the_digest_is_blind_to_the_secret_value(self):
+        steps = [{"method": "POST", "path": "/api/settings",
+                  "body": {"llm": {"apiKey": "sk-live-A"}, "station": "Harbour"}}]
+        other = [{"method": "POST", "path": "/api/settings",
+                  "body": {"llm": {"apiKey": "sk-live-B"}, "station": "Harbour"}}]
+        grid = {"schedule": {}, "override": None}
+        self.assertEqual(subwave.payload_hash(steps, grid), subwave.payload_hash(other, grid),
+                         "two runs differing only in a secret must share a digest")
+
+    def test_the_digest_is_not_the_hash_of_the_rehydrated_body(self):
+        body = {"llm": {"apiKey": "sk-live-A"}, "station": "Harbour"}
+        steps = [{"method": "POST", "path": "/api/settings", "body": body}]
+        grid = {"schedule": {}, "override": None}
+        rehydrated = hashlib.sha256(json.dumps(
+            {"steps": [{"method": "POST", "path": "/api/settings", "body": body}],
+             "grid": grid, "blocklist": {}, "skills": {}},
+            sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        self.assertNotEqual(subwave.payload_hash(steps, grid), rehydrated,
+                            "ids.lock.json must not hold a sha256 of the real credential")
+
+    def test_a_real_apply_records_a_digest_a_rotated_secret_does_not_change(self):
+        self.mark_password_secret()
+        code, output = self.run_apply(
+            config=self.config(SUBWAVE_STATION_PASSWORD="first-secret"), yes=True)
+        self.assertEqual(code, 0, output)
+
+        sent = [entry for entry in self.log()
+                if entry["path"] == "/api/settings" and "privacy" in entry["body"]]
+        self.assertEqual(sent[0]["body"]["privacy"]["password"], "first-secret",
+                         "the secret really was in the payload that got hashed")
+
+        before = len(self.log())
+        code, output = self.run_apply(
+            config=self.config(SUBWAVE_STATION_PASSWORD="rotated-secret"), yes=True)
+        self.assertEqual(code, 0, output)
+        self.assertIn("no changes since the last apply", output)
+        self.assertEqual([entry for entry in self.log()[before:] if entry["method"] != "GET"], [])
+
+
+class NoOpGuardTests(BackupBeforeWriteTests):
+    """A no-op apply must not spend a backup or refuse a live station.
+
+    The digest check used to sit after both guards, so "nothing to do" still cost
+    a full backup, and a settled station mid-show was refused for a write that
+    would never happen.
+    """
+
+    def apply_yes(self, force_now=True, no_backup=False):
+        args = argparse.Namespace(yes=True, force_now=force_now, no_backup=no_backup,
+                                  prune=False, backup_dir=str(self.backup_root))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = subwave.cmd_apply(self.config(), args)
+        return code, buffer.getvalue()
+
+    def settle(self):
+        code, output = self.apply_yes()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(sorted(self.backup_root.glob("*/*"))), 1)
+
+    def test_a_no_op_apply_takes_no_backup(self):
+        self.settle()
+        before = len(self.log())
+        code, output = self.apply_yes()
+        self.assertEqual(code, 0, output)
+        self.assertIn("no changes since the last apply", output)
+        self.assertEqual(len(sorted(self.backup_root.glob("*/*"))), 1,
+                         "a run with nothing to write must not take a second backup")
+        self.assertEqual([entry for entry in self.log()[before:] if entry["method"] != "GET"], [])
+
+    def test_a_no_op_apply_does_not_refuse_a_live_station(self):
+        self.settle()
+        before = len(self.log())
+        code, output = self.apply_yes(force_now=False)
+        self.assertEqual(code, 0, output)
+        self.assertIn("no changes since the last apply", output)
+        self.assertEqual([entry for entry in self.log()[before:] if entry["method"] != "GET"], [])
 
 
 if __name__ == "__main__":

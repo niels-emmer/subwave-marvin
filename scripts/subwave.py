@@ -441,9 +441,12 @@ def character_from(settings):
     rule per list item."""
     character = {name: copy.deepcopy(settings.get(source)) for name, source in CHARACTER_FIELDS}
     # The station stores theme as {"active": id}; the character layer holds the id.
+    # A station that has added another key to that object must not lose it here:
+    # keeping the object whole round-trips it, and validate accepts both shapes.
     theme = character.get("theme")
     if isinstance(theme, dict):
-        character["theme"] = theme.get("active")
+        extra = {key: value for key, value in theme.items() if key != "active"}
+        character["theme"] = theme if extra else theme.get("active")
 
     rules = character.get("houseRules")
     if isinstance(rules, str):
@@ -828,10 +831,10 @@ def cmd_status(config, args):
             len(settings.get("personas") or []), len(shows),
             sum(1 for cell in cells if cell), len(cells)))
         print("reads     full fidelity (state files)")
-        print("backup    complete: zip + schedule.json")
+        print("backup    complete: settings, schedule, blocklist and assets")
     else:
         print("reads     trimmed: 4 fields per persona, 7 of 26 per show, no schedule.json")
-        print("backup    zip only - DOES NOT include shows or the grid")
+        print("backup    refused at tier 1: it could not restore the programming")
 
     print("sync      %s" % _sync_line(config, tier, settings, schedule))
     print("writes    apply is a dry run unless --yes; onair verbs need --yes too")
@@ -1639,7 +1642,12 @@ def normalise_festivals(festivals):
     """Mirror the station's own transform (schemas/settings.ts): every festival
     is stored with month, day, name, mood, description and windowDays. Sending
     the short form made the station add defaults, so the payload churned on every
-    apply and diff-after-apply was never clean."""
+    apply and diff-after-apply was never clean.
+
+    A key this tool does not model is carried through, not dropped: the station
+    may know more fields than this copy of the toolkit, and a rebuild to exactly
+    six keys would delete them on the next apply with no warning.
+    """
     if not isinstance(festivals, list):
         return festivals
     normalised = []
@@ -1647,14 +1655,14 @@ def normalise_festivals(festivals):
         if not isinstance(entry, dict):
             normalised.append(entry)
             continue
-        normalised.append({
-            "month": int(entry.get("month", 1)),
-            "day": int(entry.get("day", 1)),
-            "name": str(entry.get("name") or "").strip(),
-            "mood": str(entry.get("mood") or "").strip(),
-            "description": str(entry.get("description") or "").strip(),
-            "windowDays": int(entry.get("windowDays") or 0),
-        })
+        item = copy.deepcopy(entry)
+        item["month"] = int(item.get("month", 1))
+        item["day"] = int(item.get("day", 1))
+        item["name"] = str(item.get("name") or "").strip()
+        item["mood"] = str(item.get("mood") or "").strip()
+        item["description"] = str(item.get("description") or "").strip()
+        item["windowDays"] = int(item.get("windowDays") or 0)
+        normalised.append(item)
     return normalised
 
 
@@ -1784,6 +1792,10 @@ def verify_written(config, tier, steps, grid_body):
                     problems += _diff_values(sent, found, "show %r: " % sent.get("name"))
         problems += _diff_values(grid_body.get("schedule"),
                                  (schedule_now.get("schedule") or {}), "schedule.")
+        # The override is part of the grid write. It used to be dropped without a
+        # word and never checked, so a station that cleared it reported success.
+        problems += _diff_values(grid_body.get("override"),
+                                 schedule_now.get("override"), "override")
     else:
         status, schedule_now = http_json(config, "/api/schedule")
         if status != 200:
@@ -1791,6 +1803,8 @@ def verify_written(config, tier, steps, grid_body):
         else:
             problems += _diff_values(grid_body.get("schedule"),
                                      (schedule_now.get("schedule") or {}), "schedule.")
+            problems += _diff_values(grid_body.get("override"),
+                                     schedule_now.get("override"), "override")
             for step in steps:
                 if step["entity"] != "show":
                     continue
@@ -1805,6 +1819,93 @@ def verify_written(config, tier, steps, grid_body):
                     if key in sent and sent[key] != value:
                         problems.append("show %r: %s (sent %r, station has %r)"
                                         % (sent.get("name"), key, sent[key], value))
+        # Tier 1 cannot read settings.json back, so the four fields /api/personas
+        # exposes are the only settings evidence there is. It is enough to catch a
+        # station that ignored the personas write; cmd_apply says out loud that the
+        # rest was not verified rather than implying it was.
+        problems += _verify_visible_personas(config, steps)
+    return problems
+
+
+def _verify_visible_personas(config, steps):
+    """Diff the persona fields tier 1 can read. Anything else is unverifiable."""
+    status, payload = http_json(config, "/api/personas")
+    if status != 200:
+        return ["could not read the personas back (HTTP %s)" % status]
+    live = {persona.get("id"): persona for persona in (payload or {}).get("personas") or []
+            if isinstance(persona, dict) and persona.get("id")}
+    problems = []
+    for step in steps:
+        if step["entity"] != "settings" or "personas" not in step["body"]:
+            continue
+        for persona in step["body"]["personas"]:
+            label = persona.get("name") or persona.get("id")
+            found = live.get(persona.get("id"))
+            if found is None:
+                problems.append("persona %r is not on the station" % label)
+                continue
+            for field in ("id", "name", "tagline", "avatar"):
+                if field in persona and persona[field] != found.get(field):
+                    problems.append("persona %r: %s (sent %r, station has %r)"
+                                    % (label, field, persona[field], found.get(field)))
+    return problems
+
+
+def verify_blocklist(config, document, lock):
+    """Re-read the blocklist and prove every entry and rule landed.
+
+    It is a config document written over admin HTTP like every other, and it was
+    written with no read-back at all: a station that ignored the write reported
+    success. `fetch_blocklist` is the same read `pull` trusts, at both tiers.
+    """
+    try:
+        live = fetch_blocklist(config)
+    except (ToolError, ConfigError) as exc:
+        # One aggregated failure list: "we could not prove it" is the same class
+        # of answer as "it is not there", and both belong in the same message.
+        return ["could not read the blocklist back (%s)" % exc]
+    problems = []
+    blocked = {(entry.get("type"), entry.get("id")) for entry in live.get("entries") or []}
+    for entry in document.get("entries") or []:
+        if (entry.get("type"), entry.get("id")) not in blocked:
+            problems.append("blocklist: %s %s is not blocked on the station"
+                            % (entry.get("type"), entry.get("id")))
+    rules = {rule.get("id"): rule for rule in live.get("rules") or [] if rule.get("id")}
+    for rule in document.get("rules") or []:
+        slug = rule_slug(rule)
+        uuid = (lock.get("rules") or {}).get(slug)
+        found = rules.get(uuid) if uuid else None
+        if found is None:
+            problems.append("blocklist: rule %r is not on the station" % slug)
+            continue
+        problems += _diff_values(blocklist_wire_rule(rule), found, "blocklist rule %r: " % slug)
+    return problems
+
+
+def verify_skills(config, repo_skills):
+    """Re-read each custom skill's file and prove the fields and brief landed."""
+    status, payload = http_json(config, "/api/dj/skills", admin=True)
+    if status != 200:
+        return ["could not read the skill catalog back (HTTP %s)" % status]
+    seeded = {skill.get("kind") or skill.get("slug")
+              for skill in (payload or {}).get("skills") or [] if skill.get("seeded")}
+    problems = []
+    for slug, entry in sorted(repo_skills.items()):
+        if slug in seeded:
+            # apply does not write a built-in, so there is nothing to prove
+            continue
+        code, found = http_json(config, "/api/dj/skills/%s/file" % slug, admin=True)
+        if code != 200 or not isinstance(found, dict):
+            problems.append("skill %r is not on the station (HTTP %s)" % (slug, code))
+            continue
+        expected = skill_wire_body(slug, entry)
+        found = dict(found)
+        # `diff` already treats the brief's edge whitespace as insignificant; the
+        # read-back must not be stricter than the comparison it backs up.
+        for side in (expected, found):
+            if isinstance(side.get("brief"), str):
+                side["brief"] = side["brief"].strip()
+        problems += _diff_values(expected, found, "skill %r: " % slug)
     return problems
 
 
@@ -1856,15 +1957,59 @@ def build_grid(model, lock):
                 resolved.append(cell)
         grid[day] = resolved
     override = model.get("override")
-    if override:
-        override = override if override in known else None
+    if override and override not in known:
+        if override in (model.get("show_files") or {}):
+            # A show authored here gets its id on the write and the grid is
+            # rebuilt afterwards, so a slug that names a show file is pending,
+            # not wrong. Anything else would be silently dropped by the station.
+            override = None
+        else:
+            raise ToolError(
+                "the schedule override names %r, which is neither a show on the station nor a "
+                "show file under instance/character/shows. The station accepts that write and "
+                "clears the override, so fix instance/character/schedule.json first." % override)
     return {"schedule": grid, "override": override}, sorted(set(unresolved))
 
 
+def mask_secrets(document):
+    """A copy with every value at a redaction path replaced by the sentinel.
+
+    The applied digest must never be taken over a credential: ids.lock.json is a
+    local file people copy around, and a sha256 of a password is an offline
+    oracle. The sentinel is a slot marker - the path stays, the value does not -
+    so the digest still changes when a secret is added or removed, and two runs
+    that differ only in a secret value agree.
+    """
+    node = copy.deepcopy(document)
+
+    def walk(current, path=""):
+        if isinstance(current, dict):
+            for key, value in current.items():
+                here = "%s.%s" % (path, key) if path else key
+                if isinstance(value, (dict, list)):
+                    walk(value, here)
+                elif (isinstance(value, str) and value and value != SENTINEL
+                      and _is_secret_path(here)):
+                    current[key] = SENTINEL
+        elif isinstance(current, list):
+            for index, value in enumerate(current):
+                walk(value, "%s[%d]" % (path, index))
+
+    walk(node)
+    return node
+
+
 def payload_hash(steps, grid_body, blocklist=None, skills=None):
-    """Everything apply writes, so a blocklist- or skill-only edit is not a no-op."""
+    """Everything apply writes, so a blocklist- or skill-only edit is not a no-op.
+
+    Step bodies are masked before hashing. Hashing the rehydrated bodies put a
+    live admin password and LLM key into ids.lock.json as a sha256, and it also
+    meant the recorded hash could never match the next run, which builds its
+    steps from the redacted settings.json.
+    """
     blob = json.dumps(
-        {"steps": [{"method": step["method"], "path": step["path"], "body": step["body"]}
+        {"steps": [{"method": step["method"], "path": step["path"],
+                    "body": mask_secrets(step["body"])}
                    for step in steps],
          "grid": grid_body,
          "blocklist": blocklist or {},
@@ -2193,6 +2338,26 @@ def cmd_apply(config, args):
         print("result    %d step(s) prepared, 0 requests sent" % (len(steps) + 1))
         return EXIT_OK
 
+    # Work out whether this is a no-op BEFORE the guards below: a run that would
+    # send nothing must not refuse a live station or spend a full backup. Every
+    # input here is a local file read, so nothing is sent to the station.
+    repo_blocklist = load_repo_blocklist()
+    blocklist_lock = load_blocklist_lock()
+    repo_skills = load_repo_skills()
+    digest = payload_hash(steps, grid_body, repo_blocklist,
+                          {slug: entry["text"] for slug, entry in repo_skills.items()})
+    applied = lock.get("applied") or {}
+    # `verified` is the difference between "we sent this and proved it landed"
+    # and "we sent this and the station said it did not". Without it a failed
+    # verification records the hash that makes the retry a no-op.
+    settled = applied.get("hash") == digest and applied.get("verified")
+    if settled and not args.prune:
+        print("result    no changes since the last apply (%s)" % applied.get("at"))
+        return EXIT_OK
+    if settled:
+        # Nothing to write, but a prune was asked for: fall through to it.
+        print("result    no changes to write")
+
     if not args.force_now:
         status, now = http_json(config, "/api/now-playing")
         active = (now or {}).get("activeShow") or {}
@@ -2212,26 +2377,10 @@ def cmd_apply(config, args):
             "schedule or the full show definitions, so this write would be unprotected. Pass "
             "--no-backup to accept that explicitly.")
 
-    repo_blocklist = load_repo_blocklist()
-    blocklist_lock = load_blocklist_lock()
     prune_settings_before = prune_schedule_before = None
     if args.prune:
         prune_settings_before = json.loads(read_state_file(config, "settings.json"))
         prune_schedule_before = json.loads(read_state_file(config, "schedule.json"))
-
-    repo_skills_text = {slug: entry["text"] for slug, entry in load_repo_skills().items()}
-    digest = payload_hash(steps, grid_body, repo_blocklist, repo_skills_text)
-    applied = lock.get("applied") or {}
-    # `verified` is the difference between "we sent this and proved it landed"
-    # and "we sent this and the station said it did not". Without it a failed
-    # verification records the hash that makes the retry a no-op.
-    settled = applied.get("hash") == digest and applied.get("verified")
-    if settled and not args.prune:
-        print("result    no changes since the last apply (%s)" % applied.get("at"))
-        return EXIT_OK
-    if settled:
-        # Nothing to write, but a prune was asked for: fall through to it.
-        print("result    no changes to write")
 
     for step in steps:
         status, payload = send_step(config, step, secrets)
@@ -2257,8 +2406,10 @@ def cmd_apply(config, args):
     for slug in pending_removals(repo_blocklist, blocklist_lock):
         print("pending   rule %r is in the lock but not in the file; apply does not delete "
               "(that is the deletes task)" % slug)
-    apply_blocklist(config, repo_blocklist, blocklist_lock)
-    apply_skills(config, load_repo_skills())
+    # The returned lock holds the uuids the station minted, which verification
+    # needs to look each rule up again.
+    blocklist_lock = apply_blocklist(config, repo_blocklist, blocklist_lock)
+    apply_skills(config, repo_skills)
 
     # The writes succeeded, so record that before anything else can fail: a
     # verification that throws must not erase the fact that the station changed.
@@ -2276,6 +2427,8 @@ def cmd_apply(config, args):
     # that were SENT (rehydrated), never a rebuild from the model: rebuilding
     # compares against __REDACTED__ and cries wolf on every secret.
     problems = verify_written(config, tier, steps, grid_body)
+    problems += verify_blocklist(config, repo_blocklist, blocklist_lock)
+    problems += verify_skills(config, repo_skills)
     if problems:
         shown = problems[:10]
         more = "" if len(problems) <= 10 else " (+%d more)" % (len(problems) - 10)
@@ -2288,6 +2441,13 @@ def cmd_apply(config, args):
     # retry re-sends instead of claiming there was nothing to do.
     lock["applied"]["verified"] = True
     write_json(lock_path, lock)
+    if tier == 1:
+        # Say what was NOT proved. Tier 1 cannot read settings.json back, so only
+        # the four visible persona fields were checked: claiming "verified" over
+        # the whole settings document would be the silent degradation this tool
+        # exists to avoid.
+        print("verified  grid, shows and the 4 persona fields /api/personas exposes; the rest "
+              "of settings (and every secret) is unreadable at tier 1, so it was NOT verified")
     print("result    %d step(s) written; ids.lock.json updated" % (len(steps) + 1))
 
     # Prune last, after the writes and after verification: a failed write must
@@ -2426,6 +2586,41 @@ def _duplicate_ids(documents, errors, what):
             seen[id_] = slug
 
 
+def _known_persona_ids(personas, lock):
+    """Every persona id this instance knows: from the files, and from the lock."""
+    ids = {document.get("id") for document in personas.values()
+           if isinstance(document, dict) and document.get("id")}
+    if isinstance(lock, dict):
+        ids |= set((lock.get("personas") or {}).values())
+    return ids
+
+
+def _cross_references(personas, shows, lock, errors):
+    """Every persona a show or the station points at must exist in this instance.
+
+    A typo'd host passes every field check, apply writes it, and the station
+    stores a show with no host without complaining. ARCHITECTURE.md already
+    claimed this was checked; until now it was not.
+    """
+    known = _known_persona_ids(personas, lock)
+    listed = ", ".join(sorted(known)) if known else "none"
+    for slug, show in sorted(shows.items()):
+        if not isinstance(show, dict):
+            continue
+        host = show.get("personaId")
+        if host and host not in known:
+            errors.append("shows/%s.json: personaId %r is not a known persona id (known: %s)"
+                          % (slug, host, listed))
+        for guest in show.get("guestPersonaIds") or []:
+            if guest and guest not in known:
+                errors.append("shows/%s.json: guestPersonaIds names %r, which is not a known "
+                              "persona id (known: %s)" % (slug, guest, listed))
+    active = (lock or {}).get("activePersonaId") if isinstance(lock, dict) else None
+    if active and active not in known:
+        errors.append("ids.lock.json: activePersonaId %r is not a known persona id (known: %s)"
+                      % (active, listed))
+
+
 def station_mood_names(config):
     """The station's CURRENT mood names, or None when we cannot ask.
 
@@ -2485,6 +2680,7 @@ def validate_instance(root=None, station_moods=None):
 
     _duplicate_ids(personas, errors, "persona")
     _duplicate_ids(shows, errors, "show")
+    _cross_references(personas, shows, lock, errors)
 
     character = _load_json(root / "character" / "character.json", unreadable)
     if character is not None:
@@ -2536,6 +2732,16 @@ def validate_instance(root=None, station_moods=None):
                                       "a show file" % (day, hour, cell))
                     else:
                         counts["filled"] += 1
+            override = schedule_doc.get("override")
+            if override:
+                if not isinstance(override, str):
+                    errors.append("schedule.json: 'override' must be a show slug or null")
+                elif override not in shows:
+                    # The station accepts the grid write and clears an override it
+                    # cannot resolve, so this must never reach the wire.
+                    errors.append("schedule.json: override names %r, which is not a show file. "
+                                  "The station would accept the grid and clear the override"
+                                  % override)
 
     validate_skills(root, errors, warnings)
 
@@ -3362,12 +3568,22 @@ def cmd_restore(config, args):
             written.append(relative)
             print("wrote     %s/%s" % (config.state_dir, relative))
     except ToolError as exc:
-        _rollback(state, snapshot, written)
+        problems = _rollback(state, snapshot, written)
+        if problems:
+            raise ToolError(
+                "restore failed part-way (%s), and the rollback could not put back: %s. The "
+                "station is now half-written - restore %s again, or copy those files back by "
+                "hand." % (exc, ", ".join(problems), backup["root"]))
         raise ToolError("restore failed part-way (%s); the previous state was put back" % exc)
 
     problem = _state_is_consistent(state)
     if problem:
-        _rollback(state, snapshot, written)
+        problems = _rollback(state, snapshot, written)
+        if problems:
+            raise ToolError(
+                "the restored station did not validate (%s), and the rollback could not put "
+                "back: %s. The station is now half-written - restore %s again, or copy those "
+                "files back by hand." % (problem, ", ".join(problems), backup["root"]))
         raise ToolError("the restored station did not validate (%s); the previous state was put "
                         "back. Nothing was left half-written." % problem)
 
@@ -3377,15 +3593,22 @@ def cmd_restore(config, args):
 
 
 def _rollback(state, snapshot, written):
-    """Put back every file we replaced, and remove the ones we created."""
+    """Put back every file we replaced, and remove the ones we created.
+
+    Returns what could not be undone. A rollback that half-fails must not be
+    reported as "the previous state was put back": the station is then in a state
+    nobody described, and the operator has to know which file to fix by hand.
+    """
+    problems = []
     for relative in written:
-        if relative in snapshot:
-            state.write_bytes(relative, snapshot[relative])
-        else:
-            try:
+        try:
+            if relative in snapshot:
+                state.write_bytes(relative, snapshot[relative])
+            else:
                 state.remove(relative)
-            except Exception:
-                pass
+        except Exception as exc:
+            problems.append("%s (%s)" % (relative, exc))
+    return problems
 
 
 # --------------------------------------------------------------------------
@@ -4020,7 +4243,12 @@ def _extract_tracks(result):
     try:
         payload = json.loads(text)
     except ValueError:
-        return []
+        # An unparseable reply is not an empty search. Reporting "no tracks" sent
+        # the operator looking for a song that may well be in the library.
+        raise ToolError(
+            "could not read the search results: the station's reply is not JSON (%r). The "
+            "queue call was not made - this is a response this tool cannot parse, not an "
+            "empty search." % text[:200])
     candidates = payload if isinstance(payload, list) else (
         payload.get("tracks") or payload.get("results") or [])
     tracks = []

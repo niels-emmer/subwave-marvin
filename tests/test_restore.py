@@ -240,6 +240,32 @@ class RollbackTests(RestoreTestCase):
         self.assertIn("previous state was put back", str(caught.exception))
         self.assertEqual(self.read_state("settings.json"), original_settings)
 
+    def test_a_rollback_that_also_fails_says_what_is_left_broken(self):
+        # The old message claimed "the previous state was put back" no matter
+        # what happened, so a half-written station read as a clean undo.
+        backup = self.make_backup()
+
+        class BrokenRollbackSource(subwave.LocalStateSource):
+            failing = False
+
+            def write_bytes(self, relative, payload):
+                if relative.startswith("sfx/"):
+                    self.failing = True
+                    raise subwave.ToolError("disk full")
+                if self.failing and relative == "settings.json":
+                    raise subwave.ToolError("permission denied")
+                super().write_bytes(relative, payload)
+
+        subwave.SshStateSource = lambda config: BrokenRollbackSource(self.state_dir)
+        with self.assertRaises(subwave.ToolError) as caught:
+            self.run_restore(backup, "--yes", "--force-now")
+
+        message = str(caught.exception)
+        self.assertNotIn("the previous state was put back", message)
+        self.assertIn("could not put back", message)
+        self.assertIn("settings.json", message)
+        self.assertIn("half-written", message)
+
 
 class TierTests(RestoreTestCase):
     def test_tier_1_refuses_and_explains_why(self):

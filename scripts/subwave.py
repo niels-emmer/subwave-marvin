@@ -1084,9 +1084,11 @@ def build_steps(model, lock):
         body = {"personas": personas}
         if model.get("activePersonaId"):
             body["activePersonaId"] = model["activePersonaId"]
+        # Name them: after an edit, the dry run must say which entity changed.
+        names = ", ".join(str(p.get("name") or p.get("id") or "?") for p in personas)
         steps.append({"method": "POST", "path": "/api/settings", "entity": "settings",
                       "label": "personas + activePersonaId", "body": body,
-                      "note": "%d personas" % len(personas)})
+                      "note": "%d personas: %s" % (len(personas), names)})
     settings = model.get("settings") or {}
     if settings:
         steps.append({"method": "POST", "path": "/api/settings", "entity": "settings",
@@ -1305,6 +1307,48 @@ SHOW_FIELDS = frozenset((
     "playlistStrict", "preparationSkill", "programme", "segmentSkill", "tags", "themeId",
     "topic", "vocals",
 ))
+
+# Edit-time value contracts. `validate` stays permissive about values (a newer
+# server may know more of a vocabulary, and an unknown field is only a warning);
+# `character edit-*` is strict, because a string where an integer belongs, or an
+# enum outside the set, is dropped or ignored by the station's shallow merge.
+#
+# The vocabularies are the values this repo's own station shape uses: the
+# scaffold defaults, examples/demo, tests/fixtures/station.json, and the values
+# named in skills/explain-host/SKILL.md. The station's full enum is not published
+# here, so a value outside these is refused with the allowed set rather than
+# guessed at.
+PERSONA_ENUMS = {
+    "frequency": ("chatty", "moderate"),
+    "scriptLength": ("concise", "storyteller"),
+    "linkStyle": ("natural",),
+}
+
+SHOW_ENUMS = {
+    "energies": ("high", "low", "medium"),
+    "moods": ("morning", "night", "reflective", "sunny"),
+}
+
+# kind -> field -> how one `--set field=value` becomes a JSON value. `id` is
+# deliberately absent: it is immutable and handled before this lookup.
+PERSONA_TYPES = {
+    "avatar": "string", "djMode": "boolean", "frequency": "enum", "humour": "integer",
+    "language": "string", "linkStyle": "enum", "localColour": "integer",
+    "musicLean": "list", "name": "string", "scriptLength": "enum", "skills": "list",
+    "soul": "string", "tagline": "string", "tags": "list", "tts": "json",
+    "voiceStyle": "string", "warmth": "integer",
+}
+
+SHOW_TYPES = {
+    "banter": "boolean", "energies": "enum-list", "eras": "json",
+    "excludedPlaylistIds": "list", "fadeAtShowEnd": "boolean", "filtersStrict": "boolean",
+    "genres": "list", "guestPersonaIds": "list", "maxTrackSeconds": "integer",
+    "minTrackLengthSeconds": "integer", "moods": "enum-list", "name": "string",
+    "pauseTalk": "boolean", "personaId": "string", "playlistExhaust": "boolean",
+    "playlistIds": "list", "playlistInOrder": "boolean", "playlistStrict": "boolean",
+    "preparationSkill": "string", "programme": "boolean", "segmentSkill": "string",
+    "tags": "list", "themeId": "string", "topic": "string", "vocals": "string",
+}
 
 CHARACTER_REQUIRED = ("name", "description", "locale", "timezone", "theme", "houseRules")
 
@@ -1627,6 +1671,163 @@ def _slugs(root, kind):
     return sorted(p.stem for p in (root / "character" / kind).glob("*.json"))
 
 
+def _split_list(raw):
+    """Comma-separated values, or a JSON array when it starts with '['."""
+    text = raw.strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            value = json.loads(text)
+        except ValueError as exc:
+            raise ToolError("a list takes comma-separated values or a JSON array (%s)" % exc)
+        if not isinstance(value, list):
+            raise ToolError("a list takes comma-separated values or a JSON array (got %r)" % raw)
+        return value
+    items = [part.strip() for part in text.split(",")]
+    if any(not item for item in items):
+        raise ToolError("empty item in list %r" % raw)
+    return items
+
+
+def parse_field_value(kind, field, raw):
+    """Turn one `--set field=value` into the JSON value that field must hold.
+
+    Explicit by design: an integer field rejects "6.5" instead of stringifying
+    it, a boolean accepts only true/false, and an enum names its allowed set.
+    """
+    spec = (PERSONA_TYPES if kind == "persona" else SHOW_TYPES)[field]
+    enums = PERSONA_ENUMS if kind == "persona" else SHOW_ENUMS
+    text = raw.strip()
+
+    if spec == "string":
+        return raw
+    if spec == "integer":
+        try:
+            return int(text)
+        except ValueError:
+            raise ToolError("%s is an integer; %r is not one (values are never coerced)"
+                            % (field, raw))
+    if spec == "boolean":
+        lowered = text.lower()
+        if lowered not in ("true", "false"):
+            raise ToolError("%s is a boolean: use true or false (got %r)" % (field, raw))
+        return lowered == "true"
+    if spec == "enum":
+        allowed = enums[field]
+        if text not in allowed:
+            raise ToolError("%s must be one of: %s (got %r)"
+                            % (field, ", ".join(allowed), raw))
+        return text
+    if spec == "enum-list":
+        allowed = enums[field]
+        items = _split_list(raw)
+        bad = [item for item in items if item not in allowed]
+        if bad:
+            raise ToolError("%s must be one of: %s (got %s)"
+                            % (field, ", ".join(allowed),
+                               ", ".join(repr(item) for item in bad)))
+        return items
+    if spec == "list":
+        return _split_list(raw)
+    if spec == "json":
+        try:
+            value = json.loads(raw)
+        except ValueError as exc:
+            raise ToolError("%s takes a JSON value (%s)" % (field, exc))
+        if not isinstance(value, (list, dict)):
+            raise ToolError("%s takes a JSON object or array (got %r)" % (field, raw))
+        return value
+    raise ToolError("internal: no edit type for %s.%s" % (kind, field))
+
+
+def _short(value, limit=60):
+    text = json.dumps(value, ensure_ascii=False)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def edit_entity(root, kind, args):
+    """Change only the fields named by --set. Pure local file editing.
+
+    Unnamed fields keep their value *and* their position: the document is loaded
+    and written as an ordered dict, so assigning an existing key never moves it.
+    The slug is the filename and the id is the station's identity, so neither is
+    ever derived from a new name.
+    """
+    directory = "personas" if kind == "persona" else "shows"
+    path = root / "character" / directory / ("%s.json" % args.slug)
+    if not path.is_file():
+        raise ToolError("no %s %r in %s; known: %s"
+                        % (kind, args.slug, path.parent, ", ".join(_slugs(root, directory))
+                           or "none"))
+    fields = PERSONA_FIELDS if kind == "persona" else SHOW_FIELDS
+    types = PERSONA_TYPES if kind == "persona" else SHOW_TYPES
+
+    if not args.set:
+        raise ToolError("nothing to change: pass at least one --set FIELD=VALUE")
+
+    original_text = path.read_text(encoding="utf-8")
+    document = json.loads(original_text)
+    if not isinstance(document, dict):
+        raise ToolError("%s must be a JSON object" % path)
+
+    # Refuse to build on an invalid instance: an edit is not a repair tool, and
+    # an error that predates the edit would be blamed on it.
+    before_report = validate_instance(root)
+    if before_report["errors"]:
+        raise ToolError("instance/ already fails validate (%d error(s), first: %s). Fix that "
+                        "before editing."
+                        % (len(before_report["errors"]), before_report["errors"][0]))
+
+    changes, seen = [], set()
+    for assignment in args.set:
+        if "=" not in assignment:
+            raise ToolError("--set expects FIELD=VALUE (got %r)" % assignment)
+        field, raw = assignment.split("=", 1)
+        field = field.strip()
+        if field == "id":
+            raise ToolError("id is immutable: it is the station's identity for this %s and the "
+                            "lockfile keys on it. Change other fields instead." % kind)
+        if field not in fields:
+            raise ToolError("unknown %s field %r. Fields: %s"
+                            % (kind, field, ", ".join(sorted(fields))))
+        if field in seen:
+            raise ToolError("%s is set twice; give each field once" % field)
+        if field not in types:
+            raise ToolError("internal: no edit type for %s.%s" % (kind, field))
+        seen.add(field)
+
+        value = parse_field_value(kind, field, raw)
+        present = field in document
+        if present and document[field] == value:
+            continue
+        changes.append((field, document.get(field), value, present))
+        document[field] = value
+
+    if not changes:
+        print("no change %s %s: the named field(s) already hold those values"
+              % (kind, args.slug))
+        return EXIT_OK
+
+    write_json(path, document)
+    after_report = validate_instance(root)
+    if after_report["errors"]:
+        # Never leave a half-edited entity behind: validate is the gate apply
+        # trusts, so an edit that breaks it must not survive.
+        path.write_text(original_text, encoding="utf-8")
+        raise ToolError("refusing to leave %s invalid (%s); the file was restored"
+                        % (path.name, after_report["errors"][0]))
+
+    print("edit      %s %s (%s)" % (kind, args.slug, path.name))
+    for field, before, value, present in changes:
+        print("changed   %-22s %s -> %s"
+              % (field, _short(before) if present else "(absent)", _short(value)))
+    print("kept      id %s, slug %s, %d other field(s) unchanged"
+          % (document.get("id") or "(none)", args.slug, len(document) - len(changes)))
+    print("next      subwave.py validate && subwave.py apply --dry-run")
+    return EXIT_OK
+
+
 def cmd_character(config, args):
     """Dispatch. Never touches the network: pure local file authoring."""
     root = INSTANCE_DIR
@@ -1773,6 +1974,9 @@ def cmd_character(config, args):
             sorted({day_label[d] for d, _, _ in changes}))))
         return EXIT_OK
 
+    if action in ("edit-persona", "edit-show"):
+        return edit_entity(root, "persona" if action == "edit-persona" else "show", args)
+
     raise ToolError("unknown character command %r" % action)
 
 
@@ -1822,6 +2026,20 @@ def build_parser():
     char_grid.add_argument("--to", dest="to_hour", type=int, required=True, help="hour after the last")
     char_grid.add_argument("--replace", action="store_true", help="take over cells that hold another show")
     char_grid.set_defaults(func=cmd_character)
+
+    char_edit_persona = char_sub.add_parser(
+        "edit-persona", help="change named fields of a persona; every other field is untouched")
+    char_edit_persona.add_argument("slug")
+    char_edit_persona.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE",
+                                   help="field to change, repeatable (e.g. --set warmth=7)")
+    char_edit_persona.set_defaults(func=cmd_character)
+
+    char_edit_show = char_sub.add_parser(
+        "edit-show", help="change named fields of a show; every other field is untouched")
+    char_edit_show.add_argument("slug")
+    char_edit_show.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE",
+                                help="field to change, repeatable (e.g. --set banter=true)")
+    char_edit_show.set_defaults(func=cmd_character)
 
     validate_cmd = sub.add_parser("validate", help="check instance/ before applying")
     validate_cmd.add_argument("--dir", default=None,

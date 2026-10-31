@@ -103,6 +103,11 @@ every show and the whole grid do not. So `backup` copies the config **and** thos
 - **`apply` runs `validate` first and refuses on any error.** A typo'd field is silently dropped by a
   shallow merge rather than rejected, so validation is the only thing standing between a typo and a
   live config change. Unknown fields are warnings (a newer server may add them); missing fields are errors.
+- **`character edit-persona` / `edit-show` change only the fields you name**, leave every other field's
+  value and position alone, and never touch an `id` or a slug. They refuse an unknown field (listing the
+  real ones) and a wrong type or enum rather than coercing it, and restore the file if the result would
+  fail `validate`. Values are checked at edit time; `validate` itself stays permissive about a value a
+  newer server may know.
 - **`apply` refuses a lossy capture.** `pull` records `capture.lossy` in `ids.lock.json`; a
   tier-1 `--allow-lossy` pull sets it, and `apply` then refuses outright, because pushing 7-field
   shows back would strip 19 fields per show. This is a safety property, not a warning: do not relax it.
@@ -128,6 +133,7 @@ python3 scripts/subwave.py backup    # config + assets, outside the repo
 python3 scripts/subwave.py validate  # check instance/ before applying (--dir DIR for any station)
 python3 scripts/subwave.py character init --from demo   # scaffold a character layer (no network)
 python3 scripts/subwave.py character new-persona|new-show|add-to-grid   # author personas, shows, grid
+python3 scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE  # change named fields only
 python3 scripts/subwave.py apply     # DRY RUN by default; --yes performs the writes
 ```
 

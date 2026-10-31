@@ -43,7 +43,8 @@ class AuthoringTestCase(unittest.TestCase):
         })
 
         self._saved = (subwave.INSTANCE_DIR, subwave.SshStateSource,
-                       subwave.read_state_file, subwave.detect_tier)
+                       subwave.read_state_file, subwave.detect_tier,
+                       subwave.builtin_skill_slugs)
         subwave.INSTANCE_DIR = self.tmp / "instance"
         subwave.SshStateSource = lambda config: subwave.LocalStateSource(
             self.server.state_dir)
@@ -51,6 +52,7 @@ class AuthoringTestCase(unittest.TestCase):
             self.server.station.settings if name == "settings.json"
             else self.server.station.schedule)
         subwave.detect_tier = lambda config, probe=None: (2, "mock")
+        subwave.builtin_skill_slugs = lambda config, state: {"curiosity"}
         self.addCleanup(self._restore)
 
         document = json.loads(FIXTURE.read_text(encoding="utf-8"))
@@ -64,7 +66,8 @@ class AuthoringTestCase(unittest.TestCase):
 
     def _restore(self):
         (subwave.INSTANCE_DIR, subwave.SshStateSource,
-         subwave.read_state_file, subwave.detect_tier) = self._saved
+         subwave.read_state_file, subwave.detect_tier,
+         subwave.builtin_skill_slugs) = self._saved
 
     # -- helpers -----------------------------------------------------------
     def run_cli(self, *args):

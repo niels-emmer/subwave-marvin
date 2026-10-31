@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -312,6 +313,42 @@ class BackupBeforeWriteTests(ApplyTestCase):
 
         writes = [entry for entry in self.log()[before:] if entry["method"] != "GET"]
         self.assertTrue(writes, "apply must still write after taking the backup")
+
+
+class ErrorEchoTests(ApplyTestCase):
+    """A station that echoes the request body must not leak the secret in it."""
+
+    MARKER = "sk-live-UNIQUE-MARKER"
+
+    def test_an_error_echoing_the_body_is_scrubbed(self):
+        settings_path = subwave.INSTANCE_DIR / "settings.json"
+        document = json.loads(settings_path.read_text())
+        document.setdefault("llm", {})["apiKey"] = subwave.SENTINEL
+        settings_path.write_text(json.dumps(document, indent=2))
+
+        original = subwave.http_json
+        echoed = []
+
+        def echo(config, path, **kwargs):
+            body = kwargs.get("body")
+            if kwargs.get("method") == "POST" and body and '"llm"' in json.dumps(body):
+                echoed.append(True)
+                return 400, {"error": json.dumps(body)}
+            return original(config, path, **kwargs)
+
+        subwave.http_json = echo
+        self.addCleanup(lambda: setattr(subwave, "http_json", original))
+        os.environ["ANTHROPIC_API_KEY"] = self.MARKER
+        self.addCleanup(lambda: os.environ.pop("ANTHROPIC_API_KEY", None))
+
+        with self.assertRaises(subwave.ToolError) as caught:
+            self.run_apply(yes=True)
+
+        self.assertTrue(echoed, "the echoing step must have been reached")
+        message = str(caught.exception)
+        self.assertNotIn(self.MARKER, message,
+                         "a station's error body must not print a rehydrated secret")
+        self.assertIn(subwave.SENTINEL, message)
 
 
 class IdempotenceTests(ApplyTestCase):

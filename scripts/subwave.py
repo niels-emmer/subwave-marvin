@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -222,9 +223,11 @@ def ssh_run(config, remote_command, timeout=DEFAULT_TIMEOUT, binary=False, stdin
 def read_state_file(config, filename):
     """Read a file from the controller container's state dir (tier 2)."""
     path = "%s/%s" % (config.state_dir, filename)
-    # Single-quoted so the REMOTE shell expands nothing; the local shell never
-    # sees it because the whole string is one argv element.
-    result = ssh_run(config, "docker exec %s cat '%s'" % (config.container, path))
+    # The remote shell parses this string, so every interpolated value is
+    # shell-quoted. The local shell never sees it: the whole string is one argv
+    # element. A single quote in a path used to end the quoting and run code.
+    result = ssh_run(config, "docker exec %s cat %s"
+                     % (shlex.quote(config.container), shlex.quote(path)))
     if result.returncode != 0:
         raise ToolError(
             "cannot read %s via docker exec %s: %s"
@@ -240,7 +243,8 @@ def read_state_file(config, filename):
 def ssh_probe(config):
     """(ok, detail) for tier 2. Probes; never assumes."""
     path = "%s/settings.json" % config.state_dir
-    result = ssh_run(config, "docker exec %s test -r '%s'" % (config.container, path))
+    result = ssh_run(config, "docker exec %s test -r %s"
+                     % (shlex.quote(config.container), shlex.quote(path)))
     if result.returncode == 0:
         return True, "ssh %s, docker exec %s" % (config.host, config.container)
     detail = (result.stderr or "").strip().splitlines()
@@ -1067,19 +1071,17 @@ def cmd_pull(config, args):
 
     previous_lock = {}
     previous_blocklist_lock = {"version": 1, "rules": {}, "ids": {}}
-    if INSTANCE_DIR.exists():
-        if not args.force:
-            raise ToolError(
-                "instance/ already exists (%s). Refusing to overwrite: re-run with --force to "
-                "replace it, which would lose that capture." % describe_instance())
+    replacing = INSTANCE_DIR.exists()
+    if replacing and not args.force:
+        raise ToolError(
+            "instance/ already exists (%s). Refusing to overwrite: re-run with --force to "
+            "replace it, which would lose that capture." % describe_instance())
+    if replacing:
         lock_path = INSTANCE_DIR / "ids.lock.json"
         if lock_path.is_file():
             previous_lock = json.loads(lock_path.read_text(encoding="utf-8"))
         if (INSTANCE_DIR / BLOCKLIST_LOCK).is_file():
             previous_blocklist_lock = load_blocklist_lock()
-        # Replace, do not merge: a stale file from an older layout would
-        # otherwise sit next to the new character layer and confuse the next reader.
-        shutil.rmtree(INSTANCE_DIR)
 
     losses = []
     if tier == 2:
@@ -1100,6 +1102,15 @@ def cmd_pull(config, args):
     # tier 1 has no filesystem, so it uses the admin API.
     blocklist_live = (read_blocklist_from_state(config) if tier == 2
                       else fetch_blocklist(config))
+
+    # Skills are captured before anything is removed: a station whose built-in
+    # list cannot be read must not cost the operator their captured skills.
+    captured_skills, builtin_skills = pull_skills(config, tier)
+
+    if replacing:
+        # Replace, do not merge: a stale file from an older layout would
+        # otherwise sit next to the new character layer and confuse the next reader.
+        shutil.rmtree(INSTANCE_DIR)
 
     model = build_live_model(settings, schedule)
     if model["settings"] is None:
@@ -1135,7 +1146,6 @@ def cmd_pull(config, args):
     print("blocklist %d entries, %d rules"
           % (len(blocklist["entries"]), len(blocklist["rules"])))
 
-    captured_skills, builtin_skills = pull_skills(config, tier)
     write_repo_skills(captured_skills)
     print("skills    %d custom captured%s"
           % (len(captured_skills),
@@ -1263,8 +1273,9 @@ class SshStateSource:
         self.config = config
 
     def list_files(self):
-        command = ("docker exec %s sh -c 'cd %s && find . -type f'"
-                   % (self.config.container, self.config.state_dir))
+        command = ("docker exec %s sh -c 'cd \"$1\" && find . -type f' _ %s"
+                   % (shlex.quote(self.config.container),
+                      shlex.quote(self.config.state_dir)))
         result = ssh_run(self.config, command)
         if result.returncode != 0:
             raise ToolError("cannot list %s in %s: %s"
@@ -1273,8 +1284,9 @@ class SshStateSource:
         return sorted(line[2:] for line in result.stdout.splitlines() if line.startswith("./"))
 
     def read_bytes(self, relative):
-        command = "docker exec %s cat '%s/%s'" % (
-            self.config.container, self.config.state_dir, relative)
+        command = "docker exec %s cat %s" % (
+            shlex.quote(self.config.container),
+            shlex.quote("%s/%s" % (self.config.state_dir, relative)))
         result = ssh_run(self.config, command, binary=True)
         if result.returncode != 0:
             raise ToolError("cannot read %s: %s" % (
@@ -1285,14 +1297,14 @@ class SshStateSource:
     def write_bytes(self, relative, payload):
         path = "%s/%s" % (self.config.state_dir, relative)
         parent = path.rsplit("/", 1)[0]
-        made = ssh_run(self.config, "docker exec %s mkdir -p '%s'"
-                       % (self.config.container, parent))
+        made = ssh_run(self.config, "docker exec %s mkdir -p %s"
+                       % (shlex.quote(self.config.container), shlex.quote(parent)))
         if made.returncode != 0:
             raise ToolError("cannot create %s: %s"
                             % (parent, (made.stderr or "").strip() or "unknown error"))
         result = ssh_run(self.config,
-                         "docker exec -i %s sh -c \"cat > '%s'\""
-                         % (self.config.container, path),
+                         "docker exec -i %s sh -c 'cat > \"$1\"' _ %s"
+                         % (shlex.quote(self.config.container), shlex.quote(path)),
                          binary=True, stdin=payload)
         if result.returncode != 0:
             raise ToolError("cannot write %s: %s" % (
@@ -1301,8 +1313,8 @@ class SshStateSource:
 
     def remove(self, relative):
         path = "%s/%s" % (self.config.state_dir, relative)
-        result = ssh_run(self.config, "docker exec %s rm -f '%s'"
-                         % (self.config.container, path))
+        result = ssh_run(self.config, "docker exec %s rm -f %s"
+                         % (shlex.quote(self.config.container), shlex.quote(path)))
         if result.returncode != 0:
             raise ToolError("cannot remove %s: %s"
                             % (path, (result.stderr or "").strip() or "unknown error"))
@@ -1400,6 +1412,15 @@ def print_manifest(destination, manifest):
         print("          %-24s %s" % (head, entry["reason"]))
 
 
+def _private_write(path, payload):
+    """A backup holds live credentials: owner-only, whatever the umask says."""
+    if isinstance(payload, bytes):
+        path.write_bytes(payload)
+    else:
+        path.write_text(payload, encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
 def take_backup(config, base_dir=None, state=None, with_library=False):
     """Copy everything a restore needs, outside the repo. Returns (path, manifest)."""
     state = state or SshStateSource(config)
@@ -1428,27 +1449,30 @@ def take_backup(config, base_dir=None, state=None, with_library=False):
             "Choose a directory outside %s." % (resolved, REPO_ROOT))
 
     destination.mkdir(parents=True, exist_ok=False)
-    (destination / "settings.json").write_text(settings_text, encoding="utf-8")
-    (destination / "schedule.json").write_text(schedule_text, encoding="utf-8")
+    # `mode=` is masked by the umask, so set it explicitly: settings.json in here
+    # is the live document, credentials and all.
+    os.chmod(destination, 0o700)
+    _private_write(destination / "settings.json", settings_text)
+    _private_write(destination / "schedule.json", schedule_text)
 
     blocklist_text = None
     if BLOCKLIST_FILE in state.list_files():
         blocklist_text = state.read_bytes(BLOCKLIST_FILE).decode("utf-8")
-        (destination / BLOCKLIST_FILE).write_text(blocklist_text, encoding="utf-8")
+        _private_write(destination / BLOCKLIST_FILE, blocklist_text)
 
     total = len(settings_text) + len(schedule_text) + (len(blocklist_text) if blocklist_text else 0)
     for relative in wanted:
         payload = state.read_bytes(relative)
         target = destination / "state" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(payload)
+        _private_write(target, payload)
         total += len(payload)
 
     copied_dirs = sorted({relative.split("/")[0] for relative in wanted
                           if "/" in relative and relative.split("/")[0] in ASSET_DIRS})
-    (destination / "RESTORE.md").write_text(
-        _restore_note(settings, config.state_dir or "/var/sub-wave", copied_dirs,
-                      skipped, with_library), encoding="utf-8")
+    _private_write(destination / "RESTORE.md", _restore_note(
+        settings, config.state_dir or "/var/sub-wave", copied_dirs,
+        skipped, with_library))
 
     manifest = {
         "station": station,
@@ -1464,6 +1488,7 @@ def take_backup(config, base_dir=None, state=None, with_library=False):
         "with_library": with_library,
     }
     write_json(destination / "manifest.json", manifest)
+    os.chmod(destination / "manifest.json", 0o600)
     return destination, manifest
 
 
@@ -1667,6 +1692,43 @@ def _is_secret_path(path):
                for prefix in SECRET_PATH_PREFIXES)
 
 
+def secret_values(document):
+    """Every live value sitting at a redaction path, for scrubbing a message.
+
+    Derived from SECRET_PATH_PREFIXES, so a new REDACT_PATHS entry is covered
+    without a second list to keep in step.
+    """
+    values = set()
+
+    def walk(node, path=""):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                here = "%s.%s" % (path, key) if path else key
+                if isinstance(value, (dict, list)):
+                    walk(value, here)
+                elif (isinstance(value, str) and value and value != SENTINEL
+                      and _is_secret_path(here)):
+                    values.add(value)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, "%s[%d]" % (path, index))
+
+    walk(document)
+    return values
+
+
+def scrub_secrets(text, secrets):
+    """Remove a known credential from a message before it is raised.
+
+    A station that echoes the request body in a 400 would otherwise print the
+    rehydrated secret straight into the terminal and the agent's log.
+    """
+    for value in sorted(secrets, key=len, reverse=True):
+        if value and value in text:
+            text = text.replace(value, SENTINEL)
+    return text
+
+
 def _describe(path, expected, actual):
     """One problem line. Secret paths are named, never printed."""
     clean = path.rstrip(".") or "value"
@@ -1811,7 +1873,7 @@ def payload_hash(steps, grid_body, blocklist=None, skills=None):
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def send_step(config, step):
+def send_step(config, step, secrets=()):
     status, payload = http_json(config, step["path"], admin=True,
                                 method=step["method"], body=step["body"])
     if status == 401:
@@ -1822,6 +1884,7 @@ def send_step(config, step):
         detail = ""
         if isinstance(payload, dict):
             detail = payload.get("error") or json.dumps(payload)[:200]
+        detail = scrub_secrets(str(detail), secrets)
         raise ToolError("%s %s failed: HTTP %s %s"
                         % (step["method"], step["path"], status, detail))
     return status, payload
@@ -2102,6 +2165,12 @@ def cmd_apply(config, args):
             "SUBWAVE_STATION_PASSWORD and ANTHROPIC_API_KEY can be rehydrated; use host access "
             "for the rest." % (len(set(remaining)), SENTINEL, ", ".join(sorted(set(remaining)))))
 
+    # What was rehydrated into the payload. A station error that echoes the body
+    # must not print one of these.
+    secrets = set()
+    for step in steps:
+        secrets |= secret_values(step["body"])
+
     grid_body, unresolved = build_grid(model, lock)
 
     if not args.yes:
@@ -2153,15 +2222,19 @@ def cmd_apply(config, args):
     repo_skills_text = {slug: entry["text"] for slug, entry in load_repo_skills().items()}
     digest = payload_hash(steps, grid_body, repo_blocklist, repo_skills_text)
     applied = lock.get("applied") or {}
-    if applied.get("hash") == digest and not args.prune:
+    # `verified` is the difference between "we sent this and proved it landed"
+    # and "we sent this and the station said it did not". Without it a failed
+    # verification records the hash that makes the retry a no-op.
+    settled = applied.get("hash") == digest and applied.get("verified")
+    if settled and not args.prune:
         print("result    no changes since the last apply (%s)" % applied.get("at"))
         return EXIT_OK
-    if applied.get("hash") == digest:
+    if settled:
         # Nothing to write, but a prune was asked for: fall through to it.
         print("result    no changes to write")
 
     for step in steps:
-        status, payload = send_step(config, step)
+        status, payload = send_step(config, step, secrets)
         print("wrote     %s %-14s %-28s -> HTTP %s"
               % (step["method"], step["path"], step["label"], status))
         if step["entity"] == "show":
@@ -2209,6 +2282,12 @@ def cmd_apply(config, args):
         raise ToolError(
             "the station did not store what was sent, so the change did NOT land:\n  %s%s"
             % ("\n  ".join(shown), more))
+
+    # Only now is the payload known to have landed, and only this flag lets the
+    # next apply short-circuit. A failed verification leaves it unset, so the
+    # retry re-sends instead of claiming there was nothing to do.
+    lock["applied"]["verified"] = True
+    write_json(lock_path, lock)
     print("result    %d step(s) written; ids.lock.json updated" % (len(steps) + 1))
 
     # Prune last, after the writes and after verification: a failed write must
@@ -3552,8 +3631,8 @@ def builtin_skill_slugs(config, state):
     """
     try:
         for candidate in ("/app/src/skills/builtins", "/app/dist/skills/builtins"):
-            result = ssh_run(config, "docker exec %s sh -c 'ls %s 2>/dev/null'"
-                             % (config.container, candidate))
+            result = ssh_run(config, "docker exec %s sh -c 'ls \"$1\" 2>/dev/null' _ %s"
+                             % (shlex.quote(config.container), shlex.quote(candidate)))
             names = [line.strip() for line in (result.stdout or "").splitlines()
                      if line.strip()]
             if names:
@@ -3571,9 +3650,13 @@ def pull_skills(config, tier):
         builtins = builtin_skill_slugs(config, state)
         if builtins is None:
             # Without the shipped list we cannot tell a built-in from a custom
-            # skill, and capturing the image's own skills as operator content
-            # would be wrong. Skip, loudly.
-            return {}, []
+            # skill. Returning {} here read as "this station has no skills" and
+            # the caller then emptied the operator's captured skills.
+            raise ToolError(
+                "cannot list the image's built-in skills in %s, so a custom skill cannot be "
+                "told from a built-in. Refusing to capture nothing: check that the container "
+                "has /app/src/skills/builtins, or pull with host access to a working image."
+                % config.container)
         for relative in state.list_files():
             parts = relative.split("/")
             if len(parts) == 3 and parts[0] == "skills" and parts[2] == "SKILL.md":
@@ -3611,6 +3694,12 @@ def write_repo_skills(captured, root=None):
     if base.exists():
         shutil.rmtree(base)
     for slug, text in captured.items():
+        if not SKILL_SLUG_RE.match(slug):
+            # A slug comes from the station (a directory name, or the API's
+            # `kind`), and it is about to become a path under instance/skills:
+            # `../../scripts` would write into the repo.
+            print("skipped   skill %r is not a valid skill slug; not written" % slug)
+            continue
         path = base / slug / "SKILL.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
@@ -3740,6 +3829,13 @@ def cmd_skills(config, args):
         if entry is None:
             raise ToolError("no skill %r; known: %s" % (args.slug, ", ".join(sorted(skills))
                                                         or "none"))
+        if entry.get("data") is None:
+            # The frontmatter did not parse, so `data` and `body` are None and
+            # the rewrite below would replace the whole prompt with an empty one.
+            raise ToolError(
+                "refusing to edit skills/%s: its SKILL.md frontmatter does not parse, so the "
+                "rewrite would replace the prompt with an empty one. Fix the file first "
+                "(run: subwave.py validate)." % args.slug)
         data = dict(entry.get("data") or {})
         body = entry.get("body") or ""
         if args.label is not None:

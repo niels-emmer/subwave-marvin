@@ -5,10 +5,12 @@ Fixtures come from examples/demo (the fictional station), never from instance/.
 
 import importlib.util
 import json
+import shlex
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 DEMO = ROOT / "examples" / "demo" / "character"
@@ -289,6 +291,75 @@ class TierTests(unittest.TestCase):
     def test_container_defaults(self):
         self.assertEqual(self.config().container, "sub-wave-controller")
         self.assertEqual(self.config(SUBWAVE_CONTAINER="custom").container, "custom")
+
+
+class SshQuotingTests(unittest.TestCase):
+    """A path reaches a REMOTE shell, so it must be quoted as one word.
+
+    Skill directory names and backup-supplied filenames end up inside a
+    `docker exec` command string. Before this, a single quote in a name closed
+    the quoting and the rest of the name ran as shell code on the host.
+    """
+
+    NASTY = "skills/o'brien; touch pwned; 'x/SKILL.md"
+
+    def setUp(self):
+        self.config = subwave.Config(dotenv={}, environ={
+            "SUBWAVE_HOST": "station.example",
+            "SUBWAVE_STATE_DIR": "/var/sub-wave",
+            "SUBWAVE_CONTAINER": "sub-wave-controller",
+        })
+        self.commands = []
+        self._saved = subwave.ssh_run
+        self.addCleanup(lambda: setattr(subwave, "ssh_run", self._saved))
+
+        def fake(config, command, **kwargs):
+            self.commands.append(command)
+            if kwargs.get("binary"):
+                return SimpleNamespace(returncode=0, stdout=b"{}", stderr=b"")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        subwave.ssh_run = fake
+
+    def test_a_state_file_read_quotes_the_path(self):
+        subwave.read_state_file(self.config, "settings.json")
+        self.assertEqual(self.commands, [
+            "docker exec sub-wave-controller cat %s"
+            % shlex.quote("/var/sub-wave/settings.json")])
+
+    def test_a_path_with_a_quote_semicolon_and_space_is_one_argument(self):
+        subwave.SshStateSource(self.config).read_bytes(self.NASTY)
+        expected = "/var/sub-wave/" + self.NASTY
+        self.assertEqual(
+            self.commands,
+            ["docker exec sub-wave-controller cat %s" % shlex.quote(expected)])
+        # What the remote shell would actually see: the path, and no extra word.
+        self.assertEqual(shlex.split(self.commands[0]),
+                         ["docker", "exec", "sub-wave-controller", "cat", expected])
+
+    def test_a_write_passes_the_path_as_a_positional_argument(self):
+        subwave.SshStateSource(self.config).write_bytes(self.NASTY, b"payload")
+        path = "/var/sub-wave/" + self.NASTY
+        parent = path.rsplit("/", 1)[0]
+        self.assertEqual(self.commands[0],
+                         "docker exec sub-wave-controller mkdir -p %s" % shlex.quote(parent))
+        self.assertEqual(
+            self.commands[1],
+            "docker exec -i sub-wave-controller sh -c 'cat > \"$1\"' _ %s"
+            % shlex.quote(path))
+        self.assertEqual(shlex.split(self.commands[1])[-1], path)
+
+    def test_a_remove_and_a_listing_quote_the_path(self):
+        source = subwave.SshStateSource(self.config)
+        source.remove(self.NASTY)
+        source.list_files()
+        self.assertEqual(self.commands[0],
+                         "docker exec sub-wave-controller rm -f %s"
+                         % shlex.quote("/var/sub-wave/" + self.NASTY))
+        self.assertEqual(
+            self.commands[1],
+            "docker exec sub-wave-controller sh -c 'cd \"$1\" && find . -type f' _ %s"
+            % shlex.quote("/var/sub-wave"))
 
 
 class EnvExampleTests(unittest.TestCase):

@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -158,6 +159,22 @@ class RestoreNoteTests(BackupTestCase):
         self.assertIn("## 2. Assets", note)
         self.assertIn("## 3. Restart", note)
         self.assertIn("listenerAuth", note)
+
+
+class PermissionTests(BackupTestCase):
+    """settings.json in a backup holds the live credentials, rehydrated."""
+
+    def test_every_backup_file_is_owner_only(self):
+        _, _, destination = self.run_backup()
+        stamp_dir = sorted(destination.glob("*/*"))[0]
+
+        self.assertEqual(stat.S_IMODE(stamp_dir.stat().st_mode), 0o700,
+                         "a backup directory must not be readable by other users")
+        files = [path for path in stamp_dir.rglob("*") if path.is_file()]
+        self.assertTrue(files)
+        for path in files:
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600,
+                             "%s is readable by others" % path.relative_to(stamp_dir))
 
 
 class TierTests(BackupTestCase):

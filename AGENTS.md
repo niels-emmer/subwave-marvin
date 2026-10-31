@@ -123,6 +123,13 @@ every show and the whole grid do not. So `backup` copies the config **and** thos
   `show.ts`) in the product's ladder order, not inferred from the demo; `--force-value` lets a value this
   tool does not know through with a loud warning, for a station newer than the toolkit. Values are
   checked at edit time; `validate` itself stays permissive about a value a newer server may know.
+- **`apply --prune` is the only destructive operation, and it is opt-in.** It deletes entities present on
+  the station but absent from the repo — nothing else, and never as a side effect of a plain `apply`.
+  Dry by default. A backup is mandatory (`--no-backup` is rejected), and prune runs only after the writes
+  and after post-apply verification, so a failed write never triggers a delete. Deleting a show that
+  occupies grid cells, or a persona that hosts a show, is **refused** unless `--force-prune`, naming what
+  depends on it. The active persona, the last persona and the last show are hard refusals with no
+  override: a station with no persona has no DJ. Every deletion is printed individually.
 - **`apply` refuses a lossy capture.** `pull` records `capture.lossy` in `ids.lock.json`; a
   tier-1 `--allow-lossy` pull sets it, and `apply` then refuses outright, because pushing 7-field
   shows back would strip 19 fields per show. This is a safety property, not a warning: do not relax it.

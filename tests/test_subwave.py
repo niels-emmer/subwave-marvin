@@ -291,5 +291,35 @@ class TierTests(unittest.TestCase):
         self.assertEqual(self.config(SUBWAVE_CONTAINER="custom").container, "custom")
 
 
+class EnvExampleTests(unittest.TestCase):
+    """`.env.example` is how an operator learns which variables exist.
+
+    A key the code reads but the example omits is undiscoverable: you cannot set
+    what you are never told about. Nothing else enforced this parity, and it had
+    already drifted — SUBWAVE_CONTAINER was in Config.KEYS and used by every
+    tier-2 `docker exec` while being absent from the file people copy.
+    """
+
+    def documented(self):
+        lines = (ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+        return {
+            line.split("=", 1)[0].strip()
+            for line in lines
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+
+    def test_every_config_key_is_documented(self):
+        missing = set(subwave.Config.KEYS) - self.documented()
+        self.assertEqual(missing, set(),
+                         "Config.KEYS read but not documented in .env.example: %s"
+                         % ", ".join(sorted(missing)))
+
+    def test_no_documented_key_is_unknown(self):
+        unknown = self.documented() - set(subwave.Config.KEYS)
+        self.assertEqual(unknown, set(),
+                         ".env.example documents keys the loader never reads: %s"
+                         % ", ".join(sorted(unknown)))
+
+
 if __name__ == "__main__":
     unittest.main()

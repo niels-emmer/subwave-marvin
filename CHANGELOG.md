@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- `.env.example` documents `SUBWAVE_CONTAINER`, which the config loader has read and every tier-2
+  `docker exec` has used since early on. An install whose controller container is not named
+  `sub-wave-controller` could not discover the override, so tier-2 reads failed against a container
+  that was not there. A unit test now pins `.env.example` and `Config.KEYS` to the same key set in
+  both directions, so they cannot drift again. `ANTHROPIC_API_KEY` is documented as an
+  environment-only variable: it is not a `SUBWAVE_*` key and a value in `.env` does nothing.
+
 ### Changed
 
 - [`docs/public-readiness.md`](docs/public-readiness.md) is now a record of the completed launch

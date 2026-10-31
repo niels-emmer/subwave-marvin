@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "personas": {
+    "ivo-marsh": "p_demo-ivo",
+    "nell-harrow": "p_demo-nell"
+  },
+  "shows": {
+    "first-light": "s_demo-first",
+    "late-harbour": "s_demo-late"
+  },
+  "ids": {
+    "p_demo-ivo": "ivo-marsh",
+    "p_demo-nell": "nell-harrow",
+    "s_demo-first": "first-light",
+    "s_demo-late": "late-harbour"
+  },
+  "activePersonaId": "p_demo-ivo",
+  "capture": {
+    "tier": 2,
+    "at": "2026-10-31T00:00:00Z",
+    "lossy": false,
+    "lost": []
+  }
+}

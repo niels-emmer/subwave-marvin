@@ -223,6 +223,15 @@ class DiffAfterApplyTests(ApplyTestCase):
         self.assertEqual(code, 0)
         self.assertIn("in sync", buffer.getvalue())
 
+    def test_tier_1_diff_never_claims_a_full_match(self):
+        self.run_apply(yes=True)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            subwave.cmd_diff(self.config(), argparse.Namespace())
+        output = buffer.getvalue()
+        self.assertIn("not a full match", output)
+        self.assertIn("trimmed comparison", output)
+
     def test_tier_1_diff_says_what_it_cannot_see(self):
         self.run_apply(yes=True)
         buffer = io.StringIO()

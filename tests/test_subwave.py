@@ -31,8 +31,14 @@ def demo_documents():
     character = json.loads((DEMO / "character.json").read_text())
     personas = [json.loads(p.read_text())
                 for p in sorted((DEMO / "personas").glob("*.json"))]
-    shows = [json.loads(p.read_text()) for p in sorted((DEMO / "shows").glob("*.json"))]
-    grid = json.loads((DEMO / "schedule.json").read_text())["schedule"]
+    show_files = {p.stem: json.loads(p.read_text())
+                  for p in sorted((DEMO / "shows").glob("*.json"))}
+    shows = list(show_files.values())
+    # The demo grid holds slugs (the repo shape). A "live" document holds ids,
+    # so translate here: this is the server side of the same station.
+    grid = {day: [show_files[cell]["id"] if cell in show_files else cell for cell in cells]
+            for day, cells in
+            json.loads((DEMO / "schedule.json").read_text())["schedule"].items()}
 
     settings = {
         "station": character["name"],

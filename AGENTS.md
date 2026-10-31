@@ -95,6 +95,9 @@ include the schedule (tier 2, copy `schedule.json` as well) or refuse and say wh
   costs seconds of stream interruption, so bundle such changes. Passwords and the rest apply live.
 - Never commit instance data. `instance/` and `.env` are gitignored, and `scripts/check-secrets.sh`
   blocks live values from entering a commit.
+- **`apply` runs `validate` first and refuses on any error.** A typo'd field is silently dropped by a
+  shallow merge rather than rejected, so validation is the only thing standing between a typo and a
+  live config change. Unknown fields are warnings (a newer server may add them); missing fields are errors.
 - **`apply` refuses a lossy capture.** `pull` records `capture.lossy` in `ids.lock.json`; a
   tier-1 `--allow-lossy` pull sets it, and `apply` then refuses outright, because pushing 7-field
   shows back would strip 19 fields per show. This is a safety property, not a warning: do not relax it.
@@ -116,6 +119,7 @@ python3 scripts/subwave.py status    # tier, station, on-air state, repo sync
 python3 scripts/subwave.py pull      # live -> instance/, secrets redacted (--force replaces)
 python3 scripts/subwave.py diff      # drift vs live, exit 1 when drifted
 python3 scripts/subwave.py backup    # settings.json + schedule.json, outside the repo
+python3 scripts/subwave.py validate  # check instance/ before applying
 python3 scripts/subwave.py apply     # DRY RUN by default; --yes performs the writes
 ```
 

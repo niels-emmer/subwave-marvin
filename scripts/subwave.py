@@ -55,7 +55,7 @@ REDACT_PATHS = (
 )
 
 CHARACTER_FIELDS = (
-    ("station", "station"),
+    ("name", "station"),
     ("description", "stationDescription"),
     ("locale", "locale"),
     ("timezone", "timezone"),
@@ -340,7 +340,16 @@ def strip_settings(settings):
 
 
 def character_from(settings):
-    return {name: copy.deepcopy(settings.get(source)) for name, source in CHARACTER_FIELDS}
+    """Identity fields. houseRules is normalised to a list: the station stores
+    djHouseRules as a string (often empty), while the character layer wants one
+    rule per list item."""
+    character = {name: copy.deepcopy(settings.get(source)) for name, source in CHARACTER_FIELDS}
+    rules = character.get("houseRules")
+    if isinstance(rules, str):
+        character["houseRules"] = [rules.strip()] if rules.strip() else []
+    elif not isinstance(rules, list):
+        character["houseRules"] = []
+    return character
 
 
 def build_live_model(settings, schedule):
@@ -812,7 +821,8 @@ def diff_trimmed(config, repo):
              + len(report["grid"]["changed_days"]))
     if not report["override"]["unchanged"]:
         count += 1
-    print("result    %s" % ("in sync (readable fields)" if count == 0
+    print("result    %s" % ("in sync on the readable fields only (not a full match)"
+                            if count == 0
                             else "%d change(s) in the readable fields" % count))
     return EXIT_OK if count == 0 else EXIT_DRIFT
 
@@ -1004,6 +1014,16 @@ def cmd_apply(config, args):
             "back would strip 19 fields per show on the live station. Re-pull with host access."
             % (capture.get("tier"), lost))
 
+    # validate first: a typo'd field would be silently dropped by a shallow merge
+    report = validate_instance()
+    if report["unreadable"]:
+        raise ToolError("cannot apply: instance/ is unreadable (%s). Run: subwave.py validate"
+                        % "; ".join(report["unreadable"]))
+    if report["errors"]:
+        raise ToolError(
+            "refusing to apply: validate found %d error(s), first: %s. Run: subwave.py validate"
+            % (len(report["errors"]), report["errors"][0]))
+
     model = load_instance_model()
     live_settings = None
     if tier == 2:
@@ -1092,6 +1112,226 @@ def cmd_apply(config, args):
     return EXIT_OK
 
 
+# --------------------------------------------------------------------------
+# validate: instance/ before anything is applied
+# --------------------------------------------------------------------------
+
+PERSONA_FIELDS = frozenset((
+    "avatar", "djMode", "frequency", "humour", "id", "language", "linkStyle",
+    "localColour", "musicLean", "name", "scriptLength", "skills", "soul",
+    "tagline", "tags", "tts", "voiceStyle", "warmth",
+))
+
+SHOW_FIELDS = frozenset((
+    "banter", "energies", "eras", "excludedPlaylistIds", "fadeAtShowEnd", "filtersStrict",
+    "genres", "guestPersonaIds", "id", "maxTrackSeconds", "minTrackLengthSeconds", "moods",
+    "name", "pauseTalk", "personaId", "playlistExhaust", "playlistIds", "playlistInOrder",
+    "playlistStrict", "preparationSkill", "programme", "segmentSkill", "tags", "themeId",
+    "topic", "vocals",
+))
+
+CHARACTER_REQUIRED = ("name", "description", "locale", "timezone", "theme", "houseRules")
+
+ID_PATTERNS = {
+    "persona": re.compile(r"^p_[A-Za-z0-9_-]+$"),
+    "show": re.compile(r"^s_[A-Za-z0-9_-]+$"),
+}
+
+
+def _load_json(path, unreadable):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        unreadable.append("%s: missing" % path)
+    except Exception as exc:
+        unreadable.append("%s: not valid JSON (%s)" % (path, exc))
+    return None
+
+
+def _check_fields(name, document, fields, errors, warnings, what):
+    """Required fields are errors; unknown fields are warnings.
+
+    `id` is never required: the station assigns ids, so a newly authored
+    entity legitimately has none yet.
+    """
+    if not isinstance(document, dict):
+        errors.append("%s: a %s must be a JSON object" % (name, what))
+        return
+    for field in sorted(fields - set(document) - {"id"}):
+        errors.append("%s: missing field %r" % (name, field))
+    for field in sorted(set(document) - fields):
+        warnings.append("%s: unknown field %r (kept as-is; a newer server may know it)"
+                        % (name, field))
+
+
+def _duplicate_ids(documents, errors, what):
+    seen = {}
+    for slug, document in sorted(documents.items()):
+        id_ = document.get("id") if isinstance(document, dict) else None
+        if not id_:
+            continue
+        if id_ in seen:
+            errors.append("%s %r and %r share the id %r" % (what, seen[id_], slug, id_))
+        else:
+            seen[id_] = slug
+
+
+def validate_instance(root=None):
+    """Check instance/ against the shape the server returns.
+
+    Returns {"errors", "warnings", "unreadable", "counts"}. Warnings never
+    change the exit code; unreadable input is not the same as invalid input.
+    """
+    root = Path(root or INSTANCE_DIR)
+    errors, warnings, unreadable = [], [], []
+    counts = {"personas": 0, "shows": 0, "cells": 0, "filled": 0}
+
+    lock = _load_json(root / "ids.lock.json", unreadable)
+
+    personas = {}
+    for path in sorted((root / "character" / "personas").glob("*.json")):
+        document = _load_json(path, unreadable)
+        if document is None:
+            continue
+        counts["personas"] += 1
+        personas[path.stem] = document
+        _check_fields(path.name, document, PERSONA_FIELDS, errors, warnings, "persona")
+
+    shows = {}
+    for path in sorted((root / "character" / "shows").glob("*.json")):
+        document = _load_json(path, unreadable)
+        if document is None:
+            continue
+        counts["shows"] += 1
+        shows[path.stem] = document
+        _check_fields(path.name, document, SHOW_FIELDS, errors, warnings, "show")
+
+    _duplicate_ids(personas, errors, "persona")
+    _duplicate_ids(shows, errors, "show")
+
+    character = _load_json(root / "character" / "character.json", unreadable)
+    if character is not None:
+        if not isinstance(character, dict):
+            errors.append("character.json: must be a JSON object")
+        else:
+            for field in CHARACTER_REQUIRED:
+                if field not in character:
+                    errors.append("character.json: missing field %r" % field)
+            for field in sorted(set(character) - set(CHARACTER_REQUIRED)):
+                warnings.append("character.json: unknown field %r" % field)
+            for field in ("name", "description", "locale", "timezone"):
+                if field in character and not isinstance(character[field], str):
+                    errors.append("character.json: %r must be a string" % field)
+            if "theme" in character:
+                theme = character["theme"]
+                ok = isinstance(theme, str) or (
+                    isinstance(theme, dict) and isinstance(theme.get("active"), str))
+                if not ok:
+                    errors.append("character.json: 'theme' must be a theme id string, or an "
+                                  "object with an 'active' string")
+            if "houseRules" in character:
+                rules = character["houseRules"]
+                if not (isinstance(rules, list) and all(isinstance(r, str) for r in rules)):
+                    errors.append("character.json: 'houseRules' must be a list of strings")
+
+    schedule_doc = _load_json(root / "character" / "schedule.json", unreadable)
+    if schedule_doc is not None:
+        grid = schedule_doc.get("schedule") if isinstance(schedule_doc, dict) else None
+        if not isinstance(grid, dict):
+            errors.append("schedule.json: missing a 'schedule' object")
+        else:
+            if sorted(grid) != [str(day) for day in range(7)]:
+                errors.append("schedule.json: grid must have days 0..6, found %s" % sorted(grid))
+            for day in sorted(grid):
+                cells = grid[day]
+                if not isinstance(cells, list) or len(cells) != 24:
+                    errors.append("schedule.json: day %s must have 24 cells" % day)
+                    continue
+                counts["cells"] += len(cells)
+                for hour, cell in enumerate(cells):
+                    if cell in (None, ""):
+                        errors.append("schedule.json: day %s hour %02d is empty; every cell "
+                                      "must name a show" % (day, hour))
+                    elif cell not in shows:
+                        errors.append("schedule.json: day %s hour %02d names %r, which is not "
+                                      "a show file" % (day, hour, cell))
+                    else:
+                        counts["filled"] += 1
+
+    if isinstance(lock, dict):
+        lock_personas = lock.get("personas") or {}
+        lock_shows = lock.get("shows") or {}
+
+        for slug in sorted(set(lock_personas) - set(personas)):
+            warnings.append("ids.lock.json: persona %r has an id but no file" % slug)
+        for slug in sorted(set(lock_shows) - set(shows)):
+            warnings.append("ids.lock.json: show %r has an id but no file" % slug)
+
+        seen = {}
+        for kind, mapping in (("persona", lock_personas), ("show", lock_shows)):
+            for slug, id_ in sorted(mapping.items()):
+                if not isinstance(id_, str) or not ID_PATTERNS[kind].match(id_):
+                    errors.append("ids.lock.json: %s %r has a malformed id %r"
+                                  % (kind, slug, id_))
+                    continue
+                if id_ in seen:
+                    errors.append("ids.lock.json: id %r is used by both %r and %r"
+                                  % (id_, seen[id_], slug))
+                else:
+                    seen[id_] = slug
+
+        # A file with no id and no lock entry is a NEW entity, which is the
+        # documented authoring flow. Every other combination is inconsistent.
+        for kind, documents, mapping in (("persona", personas, lock_personas),
+                                         ("show", shows, lock_shows)):
+            for slug, document in sorted(documents.items()):
+                file_id = document.get("id") if isinstance(document, dict) else None
+                lock_id = mapping.get(slug)
+                if file_id and not lock_id:
+                    errors.append("ids.lock.json: %s %r has id %r in its file but no lock "
+                                  "entry" % (kind, slug, file_id))
+                elif lock_id and not file_id:
+                    errors.append("ids.lock.json: %s %r has id %r in the lockfile but none in "
+                                  "its file - applying it would create a duplicate"
+                                  % (kind, slug, lock_id))
+                elif file_id and lock_id and file_id != lock_id:
+                    errors.append("ids.lock.json: %s %r maps to %r but its file says %r"
+                                  % (kind, slug, lock_id, file_id))
+
+        capture = lock.get("capture") or {}
+        if capture.get("lossy"):
+            detail = "; ".join(capture.get("lost") or []) or "no detail recorded"
+            errors.append("ids.lock.json: the capture is marked lossy (%s). A trimmed capture "
+                          "must not be applied" % detail)
+
+    return {"errors": errors, "warnings": warnings, "unreadable": unreadable, "counts": counts}
+
+
+def cmd_validate(config, args):
+    result = validate_instance()
+    print("validate  %s" % INSTANCE_DIR)
+    if result["unreadable"]:
+        for line in result["unreadable"]:
+            print("unreadable %s" % line)
+        print("result    cannot validate: input is missing or not JSON")
+        return EXIT_CONFIG
+
+    for line in result["errors"]:
+        print("error     %s" % line)
+    for line in result["warnings"]:
+        print("warning   %s" % line)
+
+    counts = result["counts"]
+    if result["errors"]:
+        print("result    %d error(s), %d warning(s) - fix the errors before applying"
+              % (len(result["errors"]), len(result["warnings"])))
+        return EXIT_ERROR
+    print("result    ok (%d personas, %d shows, %d/%d cells filled), %d warning(s)"
+          % (counts["personas"], counts["shows"], counts["filled"], counts["cells"],
+             len(result["warnings"])))
+    return EXIT_OK
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="subwave.py",
@@ -1110,6 +1350,9 @@ def build_parser():
 
     diff = sub.add_parser("diff", help="read-only drift report")
     diff.set_defaults(func=cmd_diff)
+
+    validate_cmd = sub.add_parser("validate", help="check instance/ before applying")
+    validate_cmd.set_defaults(func=cmd_validate)
 
     apply_cmd = sub.add_parser("apply", help="push instance/ to the station (dry run by default)")
     apply_cmd.add_argument("--yes", action="store_true", help="perform the writes")

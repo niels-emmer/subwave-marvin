@@ -10,6 +10,9 @@ proven without touching a live station:
   GET  /api/personas        public; TRIMMED to 4 fields per persona
   GET  /api/schedule        public; shows TRIMMED to 7 of 26 fields
   GET  /api/library/blocklist  admin; the third config document, returned whole
+  POST /api/library/blocklist  admin; block an entry; 409 when already blocked
+  POST /api/library/blocklist/rules      admin; mint a rule uuid
+  PUT  /api/library/blocklist/rules/:id  admin; update a rule by uuid
   GET  /api/settings        admin; the 19-key UI summary, NOT settings.json
   POST /api/settings        admin; SHALLOW merge - a top-level key replaces wholesale
   POST /api/shows           admin; upsert by show.id, assigns an id when absent,
@@ -94,6 +97,7 @@ class Station:
         self.requests = []
         self._lock = threading.Lock()
         self._next_show = 1
+        self._next_rule = 2
 
     # -- bookkeeping -------------------------------------------------------
     def record(self, method, path, body, authorised):
@@ -135,6 +139,37 @@ class Station:
             "timezone": self.settings.get("timezone"),
             "locale": self.settings.get("locale"),
         }
+
+    def add_blocklist_entry(self, body):
+        entry = body if isinstance(body, dict) else {}
+        if not entry.get("type") or not entry.get("id"):
+            return 400, {"error": "type and id are required"}
+        for existing in self.blocklist.get("entries") or []:
+            if existing.get("type") == entry["type"] and existing.get("id") == entry["id"]:
+                return 409, {"error": "already blocked"}
+        stored = dict(entry, addedAt="2026-10-31T00:00:00.000Z")
+        self.blocklist.setdefault("entries", []).append(stored)
+        return 200, stored
+
+    def add_blocklist_rule(self, body):
+        rule = dict(body if isinstance(body, dict) else {})
+        with self._lock:
+            value = "rule-%04d" % self._next_rule
+            self._next_rule += 1
+        rule["id"] = value
+        rule["addedAt"] = "2026-10-31T00:00:00.000Z"
+        self.blocklist.setdefault("rules", []).append(rule)
+        return 200, rule
+
+    def update_blocklist_rule(self, rule_id, body):
+        for index, existing in enumerate(self.blocklist.get("rules") or []):
+            if existing.get("id") == rule_id:
+                updated = dict(existing)
+                updated.update(body if isinstance(body, dict) else {})
+                updated["id"] = rule_id
+                self.blocklist["rules"][index] = updated
+                return 200, updated
+        return 404, {"error": "no such rule"}
 
     def public_blocklist(self):
         """The stored document plus the live fields the API adds."""
@@ -326,6 +361,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_blocklist())
+        if path.startswith("/api/library/blocklist/rules/") and self.command == "PUT":
+            pass  # handled in do_PUT
         if path == "/api/state":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_state())
@@ -357,6 +394,18 @@ class Handler(BaseHTTPRequestHandler):
             self.station.record("POST", path, body, True)
             code, payload = self.station.merge_settings(body or {})
             return self._send(code, payload)
+        if path == "/api/library/blocklist":
+            if not self._admin("POST", path, body):
+                return
+            self.station.record("POST", path, body, True)
+            code, payload = self.station.add_blocklist_entry(body)
+            return self._send(code, payload)
+        if path == "/api/library/blocklist/rules":
+            if not self._admin("POST", path, body):
+                return
+            self.station.record("POST", path, body, True)
+            code, payload = self.station.add_blocklist_rule(body)
+            return self._send(code, payload)
         if path == "/api/shows":
             if not self._admin("POST", path, body):
                 return
@@ -373,12 +422,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_blocklist())
+        if path.startswith("/api/library/blocklist/rules/") and self.command == "PUT":
+            pass  # handled in do_PUT
         if path == "/api/state":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_state())
         if path == "/api/personas":
             self.station.record("GET", path, None, True)
             return self._send(200, self.station.public_personas())
+        if path.startswith("/api/library/blocklist/rules/"):
+            if not self._admin("PUT", path, body):
+                return
+            self.station.record("PUT", path, body, True)
+            rule_id = path.rsplit("/", 1)[-1]
+            code, payload = self.station.update_blocklist_rule(rule_id, body)
+            return self._send(code, payload)
         if path == "/api/schedule":
             if not self._admin("PUT", path, body):
                 return

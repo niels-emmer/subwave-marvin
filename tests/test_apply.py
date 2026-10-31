@@ -49,9 +49,19 @@ class ApplyTestCase(unittest.TestCase):
             "lossy": self.lossy,
             "lost": ["show definitions: 19 of 26 fields"] if self.lossy else [],
         })
-        # the blocklist is a config document too; seed it so diff has a baseline
-        subwave.write_json(subwave.INSTANCE_DIR / subwave.BLOCKLIST_FILE,
-                            self.server.station.blocklist)
+        # the blocklist is a config document too; seed it so diff has a baseline,
+        # and give its rules the slugs validate now requires
+        blocklist = json.loads(json.dumps(self.server.station.blocklist))
+        subwave.assign_rule_slugs(blocklist["rules"], {})
+        subwave.write_json(subwave.INSTANCE_DIR / subwave.BLOCKLIST_FILE, blocklist)
+        # and the lock, or apply would treat each seeded rule as NEW and mint a
+        # second uuid for it - the exact trap the lock exists to prevent
+        lock = {"version": 1, "rules": {}, "ids": {}}
+        for rule in blocklist["rules"]:
+            if rule.get("id"):
+                lock["rules"][rule["slug"]] = rule["id"]
+                lock["ids"][rule["id"]] = rule["slug"]
+        subwave.write_json(subwave.INSTANCE_DIR / subwave.BLOCKLIST_LOCK, lock)
 
     # -- helpers -----------------------------------------------------------
     def config(self, **overrides):

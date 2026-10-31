@@ -100,6 +100,10 @@ every show and the whole grid do not. So `backup` copies the config **and** thos
   costs seconds of stream interruption, so bundle such changes. Passwords and the rest apply live.
 - Never commit instance data. `instance/` and `.env` are gitignored, and `scripts/check-secrets.sh`
   blocks live values from entering a commit.
+- **Blocklist rule identity is a slug the toolkit owns, mapped to a station uuid in
+  `instance/blocklist.lock.json`.** The station mints the uuid; without the lock every apply would POST a
+  new one for the same rule, filling RULES_MAX=50 with near-duplicates while `matchCount` still looked
+  plausible. Never POST a rule that already has a uuid, and never send the slug to the station.
 - **The blocklist is a config document, not an asset.** It lives at `${STATE_DIR}/blocklist.json` and the
   station's own API zip omits it, so a stock export/restore silently loses every ban. `pull` reads it over
   admin HTTP at both tiers (the one entity tier 1 captures losslessly), `backup` carries it, `restore`
@@ -143,6 +147,7 @@ python3 scripts/subwave.py diff      # drift vs live, exit 1 when drifted
 python3 scripts/subwave.py backup    # config + assets, outside the repo
 python3 scripts/subwave.py restore <dir>  # put a backup back (dry run; --yes writes)
 python3 scripts/subwave.py validate  # check instance/ before applying (--dir DIR for any station)
+python3 scripts/subwave.py blocklist list|block|unblock|rm|rule   # author locally (no network)
 python3 scripts/subwave.py character init --from demo   # scaffold a character layer (no network)
 python3 scripts/subwave.py character new-persona|new-show|add-to-grid   # author personas, shows, grid
 python3 scripts/subwave.py character edit-persona|edit-show <slug> --set FIELD=VALUE  # change named fields only

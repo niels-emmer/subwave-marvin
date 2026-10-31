@@ -89,8 +89,8 @@ re-litigate this from the published manual, which contradicts itself; `tools/lis
 
 `GET /api/backup/export` is a ~95 MB zip holding `settings.json`, `library.db`, skills, sfx, jingles,
 avatars and themes — and **no `schedule.json`**. Personas survive because they live in settings.json;
-every show and the whole grid do not. A backup that silently omits the programming is worse than none:
-include the schedule (tier 2, copy `schedule.json` as well) or refuse and say why (tier 1).
+every show and the whole grid do not. So `backup` copies the config **and** those assets, skips
+`library.db` unless `--with-library`, and writes a `RESTORE.md` saying where each file goes back.
 
 ## Safety
 
@@ -124,7 +124,7 @@ python3 -m unittest discover -s tests  # offline: the mock station is in-process
 python3 scripts/subwave.py status    # tier, station, on-air state, repo sync
 python3 scripts/subwave.py pull      # live -> instance/, secrets redacted (--force replaces)
 python3 scripts/subwave.py diff      # drift vs live, exit 1 when drifted
-python3 scripts/subwave.py backup    # settings.json + schedule.json, outside the repo
+python3 scripts/subwave.py backup    # config + assets, outside the repo
 python3 scripts/subwave.py validate  # check instance/ before applying
 python3 scripts/subwave.py character init --from demo   # scaffold a character layer (no network)
 python3 scripts/subwave.py character new-persona|new-show|add-to-grid   # author personas, shows, grid

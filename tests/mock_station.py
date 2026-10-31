@@ -38,6 +38,8 @@ import copy
 import io
 import json
 import re
+import shutil
+import tempfile
 import threading
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -351,13 +353,48 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found", "path": path})
 
 
+def build_state_dir(root, settings, schedule):
+    """A state dir with the shape the real one has: config, assets, and the
+    expensive library.db that a backup should skip by default."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "settings.json").write_text(json.dumps(settings, indent=2))
+    (root / "schedule.json").write_text(json.dumps(schedule, indent=2))
+
+    skill = root / "skills" / "demo-skill"
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text("# demo skill\n")
+    (skill / "tool.mjs").write_text("export default {}\n")
+
+    for name in ("sfx", "jingles", "beds"):
+        directory = root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / ("%s-one.mp3" % name)).write_bytes(b"\x00" * 1024)
+        (root / ("%s.json" % name)).write_text(json.dumps({"items": ["%s-one.mp3" % name]}))
+
+    (root / "themes").mkdir(parents=True, exist_ok=True)
+    (root / "themes" / "classic-dark.json").write_text("{}")
+
+    (root / "persona-avatars").mkdir(parents=True, exist_ok=True)
+    (root / "persona-avatars" / "p_demo_nell.png").write_bytes(b"\x89PNG" + b"\x00" * 64)
+
+    (root / "library.db").write_bytes(b"\x00" * 4096)
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+    (root / "logs" / "app.log").write_text("a log line\n")
+    (root / "secrets.env").write_text("NOT_A_REAL_SECRET=1\n")
+    (root / "archive").mkdir(parents=True, exist_ok=True)
+    (root / "archive" / "old.mp3").write_bytes(b"\x00" * 512)
+    return root
+
+
 class MockServer(ThreadingHTTPServer):
     def __init__(self, address, station):
         super().__init__(address, Handler)
         self.station = station
 
 
-def start_mock(seed=None, admin=("mock-admin", "mock-pass"), port=0, max_shows=12):
+def start_mock(seed=None, admin=("mock-admin", "mock-pass"), port=0, max_shows=12,
+               with_state_dir=True):
     """Start the mock in a background thread. Returns the server."""
     if seed is None:
         seed = json.loads(FIXTURE.read_text(encoding="utf-8"))
@@ -372,11 +409,18 @@ def start_mock(seed=None, admin=("mock-admin", "mock-pass"), port=0, max_shows=1
     thread.start()
     server.thread = thread
     server.url = "http://127.0.0.1:%d" % server.server_address[1]
+
+    server.state_dir = None
+    if with_state_dir:
+        server.state_dir = build_state_dir(
+            Path(tempfile.mkdtemp(prefix="mock-state-")), station.settings, station.schedule)
     server.admin = admin
 
     def stop():
         server.shutdown()
         server.server_close()
+        if server.state_dir is not None:
+            shutil.rmtree(server.state_dir, ignore_errors=True)
 
     server.stop = stop
     return server

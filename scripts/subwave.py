@@ -203,13 +203,13 @@ def http_json(config, path, admin=False, station=False, method="GET", body=None,
         raise ToolError("%s did not return JSON (%s)" % (url, exc))
 
 
-def ssh_run(config, remote_command, timeout=DEFAULT_TIMEOUT):
+def ssh_run(config, remote_command, timeout=DEFAULT_TIMEOUT, binary=False):
     """Run a command on the host. Returns CompletedProcess."""
     if not config.host:
         raise ConfigError("SUBWAVE_HOST is not set")
     argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", config.host, remote_command]
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(argv, capture_output=True, text=not binary, timeout=timeout)
     except FileNotFoundError:
         raise ToolError("ssh is not installed or not on PATH")
     except subprocess.TimeoutExpired:
@@ -757,12 +757,158 @@ def cmd_diff(config, args):
     return EXIT_OK if count == 0 else EXIT_DRIFT
 
 
-def take_backup(config, base_dir=None):
-    """Copy settings.json + schedule.json outside the repo. Returns (path, settings, schedule)."""
-    settings_text = read_state_file(config, "settings.json")
-    schedule_text = read_state_file(config, "schedule.json")
+# What a restore needs beyond the two config documents. The API zip carries
+# these but omits schedule.json; ours carries schedule.json, so it must carry
+# these too, or neither backup is complete.
+ASSET_DIRS = ("skills", "sfx", "jingles", "beds", "themes", "persona-avatars")
+ASSET_MANIFESTS = ("sfx.json", "jingles.json", "beds.json")
+
+# Never copied, whatever the flags say.
+NEVER_COPY = {
+    "secrets.env": "credentials, never backed up",
+    "icecast-secrets.env": "credentials, never backed up",
+    "icecast_listener_auth.txt": "derived listener-auth config",
+}
+LIBRARY_FILES = ("library.db", "library.db-wal", "library.db-shm")
+
+
+class LocalStateSource:
+    """A state dir on this machine. Used by tests; the shape is the real one."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def list_files(self):
+        return sorted(path.relative_to(self.root).as_posix()
+                      for path in self.root.rglob("*") if path.is_file())
+
+    def read_bytes(self, relative):
+        return (self.root / relative).read_bytes()
+
+
+class SshStateSource:
+    """The real thing: a root-owned state dir inside the controller container."""
+
+    def __init__(self, config):
+        self.config = config
+
+    def list_files(self):
+        command = ("docker exec %s sh -c 'cd %s && find . -type f'"
+                   % (self.config.container, self.config.state_dir))
+        result = ssh_run(self.config, command)
+        if result.returncode != 0:
+            raise ToolError("cannot list %s in %s: %s"
+                            % (self.config.state_dir, self.config.container,
+                               (result.stderr or "").strip() or "unknown error"))
+        return sorted(line[2:] for line in result.stdout.splitlines() if line.startswith("./"))
+
+    def read_bytes(self, relative):
+        command = "docker exec %s cat '%s/%s'" % (
+            self.config.container, self.config.state_dir, relative)
+        result = ssh_run(self.config, command, binary=True)
+        if result.returncode != 0:
+            raise ToolError("cannot read %s: %s" % (
+                relative, (result.stderr or b"").decode("utf-8", "replace").strip()
+                or "unknown error"))
+        return result.stdout
+
+
+def select_backup_files(files, with_library=False):
+    """Split a state listing into what we copy and what we skip, with reasons."""
+    wanted, skipped = [], []
+    for relative in files:
+        name = relative.split("/")[0]
+        if relative in ("settings.json", "schedule.json"):
+            continue  # written at the top level of the backup
+        if relative in NEVER_COPY:
+            skipped.append((relative, NEVER_COPY[relative]))
+        elif relative in LIBRARY_FILES:
+            if with_library:
+                wanted.append(relative)
+            else:
+                skipped.append((relative, "audio analysis, expensive to rebuild and large "
+                                          "(use --with-library to include it)"))
+        elif name in ASSET_DIRS or relative in ASSET_MANIFESTS:
+            wanted.append(relative)
+        else:
+            skipped.append((relative, "runtime data, not part of a restore"))
+    return wanted, skipped
+
+
+def _restore_note(settings, state_dir, copied_dirs, skipped, with_library):
+    lines = [
+        "# Restore",
+        "",
+        "Copy these back with the controller stopped. Order matters: config first, then assets.",
+        "",
+        "## 1. State files",
+        "",
+        "    settings.json  -> %s/settings.json" % state_dir,
+        "    schedule.json  -> %s/schedule.json" % state_dir,
+        "",
+        "## 2. Assets",
+        "",
+    ]
+    for directory in copied_dirs:
+        lines.append("    state/%s/  -> %s/%s/" % (directory, state_dir, directory))
+    lines += [
+        "",
+        "## 3. Restart",
+        "",
+        "Restart the mixer if `privacy.listenerAuth`, `stream.maxListeners`, `opus` or `aac`",
+        "changed: those only take effect when the controller regenerates the Icecast config.",
+        "",
+        "## Notes",
+        "",
+    ]
+    if with_library:
+        lines.append("- `library.db` was included.")
+    else:
+        lines.append("- `library.db`: audio analysis, expensive to rebuild but large. "
+                     "Re-run the analyzer after a restore.")
+    for relative, reason in skipped:
+        if relative in LIBRARY_FILES:
+            continue
+        lines.append("- `%s`: %s" % (relative, reason))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def print_manifest(destination, manifest):
+    groups, loose = {}, []
+    for relative in manifest["copied"]:
+        if relative in ("settings.json", "schedule.json"):
+            continue
+        if "/" in relative:
+            head = relative.split("/")[0]
+            groups[head] = groups.get(head, 0) + 1
+        else:
+            loose.append(relative)
+    print("path      %s" % destination)
+    print("files     %d (%d bytes)" % (manifest["files"], manifest["bytes"]))
+    print("copied    settings.json, schedule.json%s"
+          % (", " + ", ".join(sorted(loose)) if loose else ""))
+    for head in sorted(groups):
+        print("          %s/ (%d file%s)" % (head, groups[head], "" if groups[head] == 1 else "s"))
+    print("skipped   %d path(s)" % len(manifest["skipped"]))
+    seen = set()
+    for entry in manifest["skipped"]:
+        head = entry["path"].split("/")[0]
+        if head in seen:
+            continue
+        seen.add(head)
+        print("          %-24s %s" % (head, entry["reason"]))
+
+
+def take_backup(config, base_dir=None, state=None, with_library=False):
+    """Copy everything a restore needs, outside the repo. Returns (path, manifest)."""
+    state = state or SshStateSource(config)
+    settings_text = state.read_bytes("settings.json").decode("utf-8")
+    schedule_text = state.read_bytes("schedule.json").decode("utf-8")
     settings = json.loads(settings_text)
-    schedule = json.loads(schedule_text)
+    json.loads(schedule_text)
+
+    wanted, skipped = select_backup_files(state.list_files(), with_library)
 
     station = settings.get("station") or "station"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -778,7 +924,32 @@ def take_backup(config, base_dir=None):
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "settings.json").write_text(settings_text, encoding="utf-8")
     (destination / "schedule.json").write_text(schedule_text, encoding="utf-8")
-    return destination, settings, schedule
+
+    total = len(settings_text) + len(schedule_text)
+    for relative in wanted:
+        payload = state.read_bytes(relative)
+        target = destination / "state" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        total += len(payload)
+
+    copied_dirs = sorted({relative.split("/")[0] for relative in wanted
+                          if "/" in relative and relative.split("/")[0] in ASSET_DIRS})
+    (destination / "RESTORE.md").write_text(
+        _restore_note(settings, config.state_dir or "/var/sub-wave", copied_dirs,
+                      skipped, with_library), encoding="utf-8")
+
+    manifest = {
+        "station": station,
+        "at": stamp,
+        "files": 2 + len(wanted),
+        "bytes": total,
+        "copied": ["settings.json", "schedule.json"] + wanted,
+        "skipped": [{"path": path, "reason": reason} for path, reason in skipped],
+        "with_library": with_library,
+    }
+    write_json(destination / "manifest.json", manifest)
+    return destination, manifest
 
 
 def diff_trimmed(config, repo):
@@ -841,14 +1012,9 @@ def cmd_backup(config, args):
             "/api/schedule returns shows trimmed to 7 of 26 fields, so a tier-1 backup could not "
             "restore the programming. Add SUBWAVE_HOST and SUBWAVE_STATE_DIR for host access.")
 
-    destination, settings, schedule = take_backup(config, args.dir)
-
-    shows = schedule.get("shows") or []
-    cells = [cell for day in (schedule.get("schedule") or {}).values() for cell in day]
-    print("path      %s" % destination)
-    print("shows     %d" % len(shows))
-    print("grid      %d/%d cells" % (sum(1 for cell in cells if cell), len(cells)))
-    print("files     settings.json, schedule.json (unredacted, outside the repo)")
+    destination, manifest = take_backup(config, args.dir, with_library=args.with_library)
+    print_manifest(destination, manifest)
+    print("restore   %s" % (destination / "RESTORE.md"))
     return EXIT_OK
 
 
@@ -1666,8 +1832,10 @@ def build_parser():
     apply_cmd.add_argument("--prune", action="store_true", help="reserved; not implemented")
     apply_cmd.set_defaults(func=cmd_apply)
 
-    backup = sub.add_parser("backup", help="copy settings.json + schedule.json outside the repo")
+    backup = sub.add_parser("backup", help="copy config + assets outside the repo")
     backup.add_argument("--dir", help="base directory (default ~/.subwave-backups)")
+    backup.add_argument("--with-library", action="store_true",
+                        help="also copy library.db (audio analysis, large)")
     backup.set_defaults(func=cmd_backup)
 
     return parser

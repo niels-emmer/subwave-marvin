@@ -108,8 +108,11 @@ scripts/subwave.py backup <dir>      # tier 2 includes schedule.json; tier 1 ref
 - **`apply`** is idempotent and ordered: personas → shows → settings sections → grid last, because shows
   reference personas and the grid references shows. Secret-preserving merge keeps live credentials when
   a section containing them is sent. Deletes are never part of `apply`.
-- **`backup`** exists because the built-in export silently loses the programming: tier 2 = zip +
-  `schedule.json`; tier 1 = refuse with the reason, rather than hand back an incomplete backup.
+- **`backup`** exists because the built-in export silently loses the programming, and because ours
+  must not lose the assets in turn: tier 2 copies `settings.json`, `schedule.json`, `skills/`, `sfx/`,
+  `jingles/`, `beds/`, `themes/`, `persona-avatars/` and their manifests, skips `library.db` unless
+  `--with-library` (audio analysis: expensive to rebuild, large), and writes a `RESTORE.md` naming where
+  each file goes back and the order. Tier 1 refuses rather than hand back an incomplete backup.
 - **`ids.lock.json`** maps slug → server id (server ids are generated: `p_xxxxxx`, `s_xxxxxx`). It is
   generated, never hand-edited, and is what keeps a rename from creating a duplicate.
 

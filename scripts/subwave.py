@@ -1313,20 +1313,34 @@ SHOW_FIELDS = frozenset((
 # `character edit-*` is strict, because a string where an integer belongs, or an
 # enum outside the set, is dropped or ignored by the station's shallow merge.
 #
-# The vocabularies are the values this repo's own station shape uses: the
-# scaffold defaults, examples/demo, tests/fixtures/station.json, and the values
-# named in skills/explain-host/SKILL.md. The station's full enum is not published
-# here, so a value outside these is refused with the allowed set rather than
-# guessed at.
+# These vocabularies come from the PRODUCT, not from our own data. Sourcing them
+# from the two demo personas is what left `aggressive` and `extended` missing.
+# Re-check against these files when the station is upgraded:
+#
+#   controller/src/settings/vocab.ts        re-exports FREQUENCIES, SCRIPT_LENGTHS,
+#                                           LINK_STYLES
+#   controller/src/schemas/persona.ts       PERSONA_FREQUENCIES, PERSONA_SCRIPT_LENGTHS,
+#                                           PERSONA_LINK_STYLES
+#   controller/src/schemas/show.ts          SHOW_ENERGY, SHOW_VOCALS
+#
+# `frequency` is an ORDERED ladder, not a set: settings/persona.ts
+# effectiveFrequency() bumps a DJ-mode persona one rung up (index + 1, clamped),
+# so the product's order is load-bearing and must be kept.
 PERSONA_ENUMS = {
-    "frequency": ("chatty", "moderate"),
-    "scriptLength": ("concise", "storyteller"),
-    "linkStyle": ("natural",),
+    "frequency": ("silent", "quiet", "moderate", "chatty", "aggressive"),
+    "scriptLength": ("one-liner", "concise", "extended", "storyteller"),
+    "linkStyle": ("natural", "announce"),
 }
 
+# `moods` is the station's own vocabulary, not a schema enum: settings.moods is a
+# list of {name, clapPrompt} that an operator can extend. These are the shipped
+# defaults (controller/src/settings/defaults.ts). A station that has added its own
+# mood needs --allow-unknown-vocab, which is exactly what that flag is for.
 SHOW_ENUMS = {
-    "energies": ("high", "low", "medium"),
-    "moods": ("morning", "night", "reflective", "sunny"),
+    "energies": ("low", "medium", "high"),
+    "moods": ("energetic", "calm", "reflective", "celebratory", "romantic", "spiritual",
+              "focus", "workout", "driving", "cooking", "rainy", "sunny", "night",
+              "morning", "evening", "festival", "cultural"),
 }
 
 # kind -> field -> how one `--set field=value` becomes a JSON value. `id` is
@@ -1690,7 +1704,14 @@ def _split_list(raw):
     return items
 
 
-def parse_field_value(kind, field, raw):
+def _warn_unknown(field, value, allowed):
+    print("warning   %s=%r is not in the known set (%s); accepted because "
+          "--allow-unknown-vocab was passed. If the station rejects it, the "
+          "vocabulary table in this file is out of date."
+          % (field, value, ", ".join(allowed)))
+
+
+def parse_field_value(kind, field, raw, allow_unknown=False):
     """Turn one `--set field=value` into the JSON value that field must hold.
 
     Explicit by design: an integer field rejects "6.5" instead of stringifying
@@ -1716,17 +1737,21 @@ def parse_field_value(kind, field, raw):
     if spec == "enum":
         allowed = enums[field]
         if text not in allowed:
-            raise ToolError("%s must be one of: %s (got %r)"
-                            % (field, ", ".join(allowed), raw))
+            if not allow_unknown:
+                raise ToolError("%s must be one of: %s (got %r)"
+                                % (field, ", ".join(allowed), raw))
+            _warn_unknown(field, text, allowed)
         return text
     if spec == "enum-list":
         allowed = enums[field]
         items = _split_list(raw)
         bad = [item for item in items if item not in allowed]
         if bad:
-            raise ToolError("%s must be one of: %s (got %s)"
-                            % (field, ", ".join(allowed),
-                               ", ".join(repr(item) for item in bad)))
+            if not allow_unknown:
+                raise ToolError("%s must be one of: %s (got %s)"
+                                % (field, ", ".join(allowed),
+                                   ", ".join(repr(item) for item in bad)))
+            _warn_unknown(field, ", ".join(bad), allowed)
         return items
     if spec == "list":
         return _split_list(raw)
@@ -1797,7 +1822,8 @@ def edit_entity(root, kind, args):
             raise ToolError("internal: no edit type for %s.%s" % (kind, field))
         seen.add(field)
 
-        value = parse_field_value(kind, field, raw)
+        value = parse_field_value(kind, field, raw,
+                                  allow_unknown=getattr(args, "allow_unknown_vocab", False))
         present = field in document
         if present and document[field] == value:
             continue
@@ -2032,6 +2058,8 @@ def build_parser():
     char_edit_persona.add_argument("slug")
     char_edit_persona.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE",
                                    help="field to change, repeatable (e.g. --set warmth=7)")
+    char_edit_persona.add_argument("--allow-unknown-vocab", action="store_true",
+                                   help="accept a value outside the known vocabulary, with a warning")
     char_edit_persona.set_defaults(func=cmd_character)
 
     char_edit_show = char_sub.add_parser(
@@ -2039,6 +2067,8 @@ def build_parser():
     char_edit_show.add_argument("slug")
     char_edit_show.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE",
                                 help="field to change, repeatable (e.g. --set banter=true)")
+    char_edit_show.add_argument("--allow-unknown-vocab", action="store_true",
+                                help="accept a value outside the known vocabulary, with a warning")
     char_edit_show.set_defaults(func=cmd_character)
 
     validate_cmd = sub.add_parser("validate", help="check instance/ before applying")

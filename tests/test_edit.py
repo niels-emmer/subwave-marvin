@@ -231,3 +231,68 @@ class RefusalTests(EditTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VocabularyTests(EditTestCase):
+    """The vocabularies must come from the product, not from our own data.
+
+    They were derived from the two demo personas, which left out `aggressive`
+    and `extended` - real in-use values - so the tool refused valid edits. These
+    tests fail if the tables drift back to a subset.
+    """
+
+    def test_frequency_is_the_product_ladder_in_order(self):
+        # settings/persona.ts effectiveFrequency() bumps one rung up (index + 1,
+        # clamped), so the ORDER is semantic, not just the membership.
+        self.assertEqual(subwave.PERSONA_ENUMS["frequency"],
+                         ("silent", "quiet", "moderate", "chatty", "aggressive"))
+
+    def test_script_length_is_complete(self):
+        self.assertEqual(subwave.PERSONA_ENUMS["scriptLength"],
+                         ("one-liner", "concise", "extended", "storyteller"))
+
+    def test_link_style_is_complete(self):
+        self.assertEqual(subwave.PERSONA_ENUMS["linkStyle"], ("natural", "announce"))
+
+    def test_aggressive_is_accepted(self):
+        code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                    "--set", "frequency=aggressive")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.read("personas", "ivo-marsh")["frequency"], "aggressive")
+
+    def test_extended_is_accepted(self):
+        code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                    "--set", "scriptLength=extended")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.read("personas", "ivo-marsh")["scriptLength"], "extended")
+
+    def test_announce_is_accepted(self):
+        code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                    "--set", "linkStyle=announce")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.read("personas", "ivo-marsh")["linkStyle"], "announce")
+
+    def test_an_unknown_value_is_refused_naming_the_whole_set(self):
+        before = self.persona_path("ivo-marsh").read_text()
+        code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                    "--set", "frequency=shouty")
+        self.assertEqual(code, 1, output)
+        self.assertIn("must be one of", output)
+        self.assertIn("silent", output)
+        self.assertIn("aggressive", output)
+        self.assertEqual(self.persona_path("ivo-marsh").read_text(), before,
+                         "a refused edit must not write")
+
+    def test_allow_unknown_vocab_accepts_with_a_loud_warning(self):
+        code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                    "--set", "frequency=shouty", "--allow-unknown-vocab")
+        self.assertEqual(code, 0, output)
+        self.assertIn("warning", output)
+        self.assertIn("--allow-unknown-vocab", output)
+        self.assertEqual(self.read("personas", "ivo-marsh")["frequency"], "shouty")
+
+    def test_the_escape_flag_does_not_relax_types(self):
+        code, output = self.run_cli("character", "edit-persona", "ivo-marsh",
+                                    "--set", "humour=very", "--allow-unknown-vocab")
+        self.assertEqual(code, 1, output)
+        self.assertIn("integer", output)

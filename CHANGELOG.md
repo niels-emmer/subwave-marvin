@@ -35,6 +35,17 @@ All notable changes to this project are documented here. The format is based on
   some time, so the line was false.
 - `character init` records an **authored** capture (`tier: null`, `source: "authored"`) instead of
   hardcoding `tier: 2` for files that were never read from a station. `examples/demo/ids.lock.json` matches.
+- `docs/PLAN.md` is now only what is left to do. Everything durable about how the tool is built — system
+  shape, data model, the write pipeline and its ordering, validation, invariants, repo layout, verification
+  strategy — moved to the new [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The old plan had drifted into
+  contradicting itself: it still described the tool as P1, claimed nothing had ever been applied to a live
+  station two sections after recording the first live apply, listed on-air control and pruning as non-goals
+  after both shipped, and named a `tools/schema.py` that does not exist. Open questions now have a single
+  home in PLAN, and the decision log points at it instead of keeping a second copy to fall out of date.
+- [`docs/public-readiness.md`](docs/public-readiness.md) is now a record of the completed launch
+  rather than a pre-flight checklist: the state at publication, the settings to re-verify, and the
+  lesson that a public repository exposes **every branch**, so the leak sweep has to cover remote
+  refs and not just `main`.
 
 ### Fixed
 
@@ -44,13 +55,6 @@ All notable changes to this project are documented here. The format is based on
   that was not there. A unit test now pins `.env.example` and `Config.KEYS` to the same key set in
   both directions, so they cannot drift again. `ANTHROPIC_API_KEY` is documented as an
   environment-only variable: it is not a `SUBWAVE_*` key and a value in `.env` does nothing.
-
-### Changed
-
-- [`docs/public-readiness.md`](docs/public-readiness.md) is now a record of the completed launch
-  rather than a pre-flight checklist: the state at publication, the settings to re-verify, and the
-  lesson that a public repository exposes **every branch**, so the leak sweep has to cover remote
-  refs and not just `main`.
 
 ## [1.0.0] — 2026-10-31
 

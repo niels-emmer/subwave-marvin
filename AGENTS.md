@@ -218,5 +218,5 @@ holds STATION skills — the DJ's segments (`<slug>/SKILL.md`). They are differe
 record `apply` checks, and the hash of the last applied payload.
 
 `examples/demo/` is a committed fictional station in the same shape, so the repo is testable
-with no live station. `docs/PLAN.md` holds the design and phases, `docs/decision-log.md` the
-decisions, and `docs/applied.md` the on-air audit trail.
+with no live station. `docs/ARCHITECTURE.md` describes how the tool is built, `docs/PLAN.md` what
+is still to do, `docs/decision-log.md` the decisions, and `docs/applied.md` the on-air audit trail.

@@ -225,10 +225,5 @@ Never rewrite an entry; supersede it with a new one and mark the old one `supers
 
 ## Open questions (not decided)
 
-Tracked in `docs/PLAN.md` §12. Do not resolve these in code.
-
-- **Tier-1 schedule writes** — allow `PUT /api/schedule` at tier 1, or refuse because shows cannot be read?
-- **Playlist anchoring** — how does the toolkit learn Navidrome playlist ids?
-- **Deploy artifacts** — ship a compose file, or point at upstream?
-- **Demo as template** — is `examples/demo` illustrative only, or the thing users copy?
-- **Skill surface** — which tasks get a skill first?
+Tracked in [`docs/PLAN.md`](PLAN.md#open-questions--not-yet-decided), which is the single home for them.
+Do not resolve one in code without recording the decision here.

@@ -198,4 +198,4 @@ Two directories are called `skills/`, and they are different things:
 
 ## Where to read more
 
-`AGENTS.md` for agents and the full guard list · `docs/PLAN.md` for design · `docs/decision-log.md` for why · `docs/applied.md` for what has aired.
+`AGENTS.md` for agents and the full guard list · `docs/ARCHITECTURE.md` for how it is built · `docs/PLAN.md` for what is left · `docs/decision-log.md` for why · `docs/applied.md` for what has aired.

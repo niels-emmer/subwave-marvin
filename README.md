@@ -88,7 +88,7 @@ show is on air; `--no-backup` skips the pre-apply backup and `--backup-dir` move
 | --- | --- | --- |
 | `character init` | create the character layer | `character init --from demo` |
 | `character new-persona` / `new-show` | a persona (18 fields) or a show (26) | `character new-show <slug> --persona <persona>` |
-| `character add-to-grid` | fill grid cells, or `--clear` them | `character add-to-grid <show> --days mon --from 9 --to 12` |
+| `character add-to-grid [slug] --days ... --from ... --to ... [--replace] [--clear]` | fill grid cells; `--clear` empties them instead and needs no slug | `character add-to-grid <show> --days mon --from 9 --to 12` |
 | `character edit-persona` / `edit-show` | change named fields only | `character edit-persona <persona> --set warmth=8` |
 | `skills` | the DJ's own segments | `skills new late-shift`, `skills edit <slug> --brief "..."` |
 | `blocklist` | bans | `blocklist block --type artist --id <id>` |

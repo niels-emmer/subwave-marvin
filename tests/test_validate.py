@@ -273,6 +273,63 @@ class DemoDirTests(unittest.TestCase):
         self.assertIn("1 error(s)", output)
 
 
+class CrossReferenceTests(ValidateTestCase):
+    """A persona a show points at must exist here.
+
+    ARCHITECTURE.md claimed this was checked. It was not: a typo'd host passed
+    every field check, apply wrote it, and the station stored a show with no host.
+    """
+
+    def test_a_personaId_that_names_no_persona_is_an_error(self):
+        path = self.show_file()
+        self.edit("character", "shows", path.name,
+                  mutate=lambda d: d.__setitem__("personaId", "p_ghost"))
+        code, output = self.run_validate()
+        self.assertEqual(code, 1)
+        self.assertIn("personaId 'p_ghost' is not a known persona id", output)
+        self.assertIn("p_demo_ivo", output, "the error must list the ids that do exist")
+
+    def test_a_guestPersonaIds_entry_that_names_no_persona_is_an_error(self):
+        path = self.show_file()
+        self.edit("character", "shows", path.name,
+                  mutate=lambda d: d.__setitem__("guestPersonaIds", ["p_ghost"]))
+        code, output = self.run_validate()
+        self.assertEqual(code, 1)
+        self.assertIn("guestPersonaIds names 'p_ghost'", output)
+
+    def test_an_activePersonaId_that_names_no_persona_is_an_error(self):
+        self.edit("ids.lock.json",
+                  mutate=lambda d: d.__setitem__("activePersonaId", "p_ghost"))
+        code, output = self.run_validate()
+        self.assertEqual(code, 1)
+        self.assertIn("activePersonaId 'p_ghost'", output)
+
+    def test_a_show_with_no_host_is_still_legal(self):
+        # A hostless show is a shape the station accepts; the check is about a
+        # reference that names nothing, not about requiring one.
+        path = self.show_file()
+        self.edit("character", "shows", path.name,
+                  mutate=lambda d: d.__setitem__("personaId", ""))
+        code, output = self.run_validate()
+        self.assertEqual(code, 0, output)
+
+
+class OverrideTests(ValidateTestCase):
+    def test_an_override_that_names_no_show_file_is_an_error(self):
+        self.edit("character", "schedule.json",
+                  mutate=lambda d: d.__setitem__("override", "no-such-show"))
+        code, output = self.run_validate()
+        self.assertEqual(code, 1)
+        self.assertIn("override names 'no-such-show'", output)
+        self.assertIn("clear the override", output)
+
+    def test_an_override_that_names_a_show_file_is_fine(self):
+        self.edit("character", "schedule.json",
+                  mutate=lambda d: d.__setitem__("override", "late-harbour"))
+        code, output = self.run_validate()
+        self.assertEqual(code, 0, output)
+
+
 class ApplyRefusalTests(ValidateTestCase):
     def test_apply_refuses_when_validate_finds_errors(self):
         path = self.show_file()
@@ -285,6 +342,18 @@ class ApplyRefusalTests(ValidateTestCase):
                 subwave.cmd_apply(config, args)
         self.assertIn("validate", str(caught.exception))
         self.assertIn("'genres'", str(caught.exception))
+
+    def test_apply_refuses_a_show_whose_host_does_not_exist(self):
+        path = self.show_file()
+        self.edit("character", "shows", path.name,
+                  mutate=lambda d: d.__setitem__("personaId", "p_ghost"))
+        args = argparse.Namespace(yes=True, force_now=True, no_backup=True,
+                                  prune=False, backup_dir=None)
+        config = subwave.Config(dotenv={}, environ={"SUBWAVE_BASE_URL": "http://127.0.0.1:1"})
+        with self.assertRaises(subwave.ToolError) as caught:
+            with contextlib.redirect_stdout(io.StringIO()):
+                subwave.cmd_apply(config, args)
+        self.assertIn("p_ghost", str(caught.exception))
 
 
 if __name__ == "__main__":

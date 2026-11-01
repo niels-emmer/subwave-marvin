@@ -3,7 +3,9 @@
 Fixtures come from examples/demo (the fictional station), never from instance/.
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import shlex
 import shutil
@@ -390,6 +392,50 @@ class EnvExampleTests(unittest.TestCase):
         self.assertEqual(unknown, set(),
                          ".env.example documents keys the loader never reads: %s"
                          % ", ".join(sorted(unknown)))
+
+
+class StatusBackupTests(unittest.TestCase):
+    """`status` must describe the backup this tool actually takes.
+
+    It claimed a "zip + schedule.json" at tier 2, where take_backup writes no zip,
+    and a "partial backup" at tier 1, where backup refuses outright.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._saved = (subwave.INSTANCE_DIR, subwave.detect_tier, subwave.read_state_file)
+        subwave.INSTANCE_DIR = self.tmp / "instance"
+        subwave.read_state_file = lambda config, name: json.dumps(
+            {"personas": [], "station": "Mock FM"} if name == "settings.json"
+            else {"shows": [], "schedule": {}})
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        (subwave.INSTANCE_DIR, subwave.detect_tier, subwave.read_state_file) = self._saved
+
+    def run_status(self, tier, **environ):
+        subwave.detect_tier = lambda config, probe=None: (tier, "test")
+        config = subwave.Config(dotenv={}, environ=environ)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            subwave.cmd_status(config, SimpleNamespace())
+        return buffer.getvalue()
+
+    def backup_line(self, output):
+        return [line for line in output.splitlines() if line.startswith("backup")]
+
+    def test_tier_2_describes_what_take_backup_writes(self):
+        output = self.run_status(2)
+        self.assertEqual(self.backup_line(output),
+                         ["backup    complete: settings, schedule, blocklist and assets"])
+        self.assertNotIn("zip", output, "take_backup writes no zip")
+
+    def test_tier_1_does_not_claim_a_partial_backup(self):
+        output = self.run_status(1, SUBWAVE_BASE_URL="http://127.0.0.1:9")
+        self.assertEqual(self.backup_line(output),
+                         ["backup    refused at tier 1: it could not restore the programming"])
+        self.assertNotIn("zip", output)
 
 
 if __name__ == "__main__":

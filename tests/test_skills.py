@@ -210,6 +210,43 @@ class ApplyTests(SkillsTestCase):
         self.assertEqual(deletes, [])
 
 
+class SkillVerificationTests(SkillsTestCase):
+    """Skills are written like the rest, so they are read back like the rest."""
+
+    def setUp(self):
+        super().setUp()
+        self.pull()
+
+    def test_a_skill_write_is_read_back(self):
+        before = len(self.server.station.requests)
+        code, output = self.apply()
+        self.assertEqual(code, 0, output)
+
+        log = self.server.station.requests[before:]
+        writes = [index for index, entry in enumerate(log)
+                  if entry["method"] in ("POST", "PUT")
+                  and entry["path"].startswith("/api/dj/skills")]
+        reads = [index for index, entry in enumerate(log)
+                 if entry["method"] == "GET"
+                 and entry["path"] == "/api/dj/skills/demo-skill/file"]
+        self.assertTrue(writes, "the skill must be written")
+        self.assertTrue(reads, "the skill must be read back")
+        self.assertGreater(reads[-1], writes[-1], "the read-back must follow the write")
+
+    def test_a_station_that_ignores_a_skill_write_is_caught(self):
+        path = self.skill_path("demo-skill")
+        path.write_text(path.read_text().replace("fictional segment",
+                                                 "fictional segment, rewritten"))
+        # 200, and stores nothing: the silent no-op this check exists for.
+        self.server.station.update_skill = lambda slug, body: (200, {"skills": []})
+
+        code, output = self.apply()
+
+        self.assertNotEqual(code, 0, "a station that ignored the write must not exit 0")
+        self.assertIn("did NOT land", output)
+        self.assertIn("demo-skill", output)
+
+
 class DiffTests(SkillsTestCase):
     def setUp(self):
         super().setUp()

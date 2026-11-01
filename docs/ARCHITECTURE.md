@@ -167,8 +167,8 @@ pull ──► instance/ ──edit──► validate ──► diff ──► a
 
 Guards that stop the pipeline before any write: a lossy capture, a payload still holding the sentinel,
 `validate` errors, mid-show without `--force-now`, tier 1 without `--no-backup`, and (for prune) a
-dependency or hard refusal. `apply` also digests the payload and does nothing when the station already
-matches the last apply.
+dependency or hard refusal. Before those guards run, `apply` digests the payload and does nothing when the
+station already matches the last apply, so a no-op neither refuses a live station nor spends a backup.
 
 **Backup and restore** are the other half of each other. `backup` copies the config documents plus the
 assets (`skills/`, `sfx/`, `jingles/`, `beds/`, `themes/`, `persona-avatars/` and their manifests), skips

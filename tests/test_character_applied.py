@@ -319,6 +319,34 @@ class RoundTripTests(CharacterAppliedTests):
         self.assertEqual(code, 0, output)
         self.assertIn("in sync", output)
 
+    def test_a_festival_key_this_tool_does_not_model_survives_apply(self):
+        # The station may know more fields than this copy of the toolkit. A
+        # rebuild to exactly six keys deleted them on the next apply.
+        settings = json.loads((subwave.INSTANCE_DIR / "settings.json").read_text())
+        settings["festivals"] = [{"month": 6, "day": 21, "name": "Midsummer",
+                                  "mood": "warm", "art": "sun-wheel"}]
+        (subwave.INSTANCE_DIR / "settings.json").write_text(json.dumps(settings, indent=2))
+
+        code, output = self.apply()
+        self.assertEqual(code, 0, output)
+        stored = self.station_settings()["festivals"][0]
+        self.assertEqual(stored["art"], "sun-wheel", "an unknown festival key must survive")
+        self.assertEqual(stored["description"], "", "the known keys are still normalised")
+
+    def test_a_theme_object_with_extra_keys_round_trips(self):
+        self.server.station.settings["theme"] = {"active": "classic-dark", "palette": "dusk"}
+        self.assertEqual(self.run_cli("pull", "--force")[0], 0)
+
+        character = json.loads(self.character_path().read_text())
+        self.assertEqual(character["theme"], {"active": "classic-dark", "palette": "dusk"},
+                         "the theme object is kept whole, not cut to its id")
+
+        code, output = self.apply()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.station_settings()["theme"],
+                         {"active": "classic-dark", "palette": "dusk"},
+                         "apply must send the extra key back, not delete it")
+
 
 if __name__ == "__main__":
     unittest.main()

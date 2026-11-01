@@ -227,5 +227,42 @@ class BoundaryTests(OnAirTestCase):
         self.assertEqual(before, after, "on-air control never writes to the repo")
 
 
+class UnparseableResultTests(unittest.TestCase):
+    """A reply this tool cannot parse is not an empty result.
+
+    `onair queue` used to read an unparseable search reply as "no tracks", which
+    sent the operator hunting for a song that may well be in the library.
+    """
+
+    class Client:
+        def __init__(self, text):
+            self.text = text
+
+        def call(self, name, arguments):
+            return {"content": [{"type": "text", "text": self.text}]}
+
+    def queue(self, text):
+        args = type("Args", (), {"text": "midnight", "pick": None, "yes": True})()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            subwave._onair_queue(self.Client(text), args)
+        return buffer.getvalue()
+
+    def test_an_unparseable_search_reply_is_a_parse_error(self):
+        with self.assertRaises(subwave.ToolError) as caught:
+            self.queue("<html>502 Bad Gateway</html>")
+
+        message = str(caught.exception)
+        self.assertIn("not JSON", message)
+        self.assertIn("502 Bad Gateway", message,
+                      "the error must show the reply it could not read")
+        self.assertNotIn("returned no tracks", message)
+
+    def test_a_genuinely_empty_search_still_says_no_tracks(self):
+        with self.assertRaises(subwave.ToolError) as caught:
+            self.queue(json.dumps({"tracks": []}))
+        self.assertIn("returned no tracks", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
